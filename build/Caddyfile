@@ -1,0 +1,13 @@
+{
+    order maintenance first
+}
+
+localhost {
+    maintenance {
+       template "/home/dev/DOCKER/fops-caddy-maintenance-plugin/build/maintenance.html"
+    }
+
+    route /api/maintenance* {
+        maintenance_api
+    }
+}
