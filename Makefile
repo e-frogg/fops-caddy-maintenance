@@ -29,4 +29,5 @@ clean:
 	@rm -rf $(BUILD_DIR)/caddy
 
 test:
-	@go test -cover -v ./...
+	@go test -coverprofile=./build/coverage.out -cover -v ./...
+	@go tool cover -html=./build/coverage.out
