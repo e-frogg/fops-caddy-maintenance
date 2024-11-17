@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -391,6 +393,102 @@ func TestMaintenanceHandler_ServeHTTP_AllowedIPs(t *testing.T) {
 				assert.Equal(t, http.StatusOK, w.Code)
 				assert.Equal(t, "passed", w.Header().Get("X-Test"))
 			}
+		})
+	}
+}
+
+func TestParseCaddyfile(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		expectedM     *MaintenanceHandler
+		expectErr     bool
+		expectedErrIs string
+	}{
+		{
+			name:      "Basic directive without args",
+			input:     "maintenance",
+			expectedM: &MaintenanceHandler{},
+		},
+		{
+			name:  "Template path as argument",
+			input: "maintenance /path/to/template.html",
+			expectedM: &MaintenanceHandler{
+				HTMLTemplate: "/path/to/template.html",
+			},
+		},
+		{
+			name: "Template in block",
+			input: `maintenance {
+				template /path/to/template.html
+			}`,
+			expectedM: &MaintenanceHandler{
+				HTMLTemplate: "/path/to/template.html",
+			},
+		},
+		{
+			name: "Allowed IPs in block",
+			input: `maintenance {
+				allowed_ips 192.168.1.100 10.0.0.1
+			}`,
+			expectedM: &MaintenanceHandler{
+				AllowedIPs: []string{"192.168.1.100", "10.0.0.1"},
+			},
+		},
+		{
+			name: "Complete configuration",
+			input: `maintenance {
+				template /path/to/template.html
+				allowed_ips 192.168.1.100 10.0.0.1
+			}`,
+			expectedM: &MaintenanceHandler{
+				HTMLTemplate: "/path/to/template.html",
+				AllowedIPs:   []string{"192.168.1.100", "10.0.0.1"},
+			},
+		},
+		{
+			name: "Invalid subdirective",
+			input: `maintenance {
+				invalid_directive value
+			}`,
+			expectErr:     true,
+			expectedErrIs: "unknown subdirective 'invalid_directive'",
+		},
+		{
+			name: "Template without value",
+			input: `maintenance {
+				template
+			}`,
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a new dispenser with the test input
+			d := caddyfile.NewTestDispenser(tt.input)
+
+			// Parse the Caddyfile
+			h := httpcaddyfile.Helper{Dispenser: d}
+			actual, err := parseCaddyfile(h)
+
+			// Check error expectations
+			if tt.expectErr {
+				require.Error(t, err)
+				if tt.expectedErrIs != "" {
+					assert.Contains(t, err.Error(), tt.expectedErrIs)
+				}
+				return
+			}
+			require.NoError(t, err)
+
+			// Type assert and compare the results
+			actualHandler, ok := actual.(*MaintenanceHandler)
+			require.True(t, ok)
+
+			// Compare fields
+			assert.Equal(t, tt.expectedM.HTMLTemplate, actualHandler.HTMLTemplate)
+			assert.Equal(t, tt.expectedM.AllowedIPs, actualHandler.AllowedIPs)
 		})
 	}
 }
