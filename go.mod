@@ -1,4 +1,4 @@
-module e-frogg/fops-caddy-maintenance
+module github.com/e-frogg/fops-caddy-maintenance
 
 go 1.22
 
