@@ -1,0 +1,43 @@
+# Build stage
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /build
+
+# Install required build tools
+RUN apk add --no-cache git make
+
+# Install xcaddy
+RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+
+# Copy source code
+COPY ./ .
+
+# Build Caddy with our plugin
+RUN xcaddy build \
+    --with github.com/e-frogg/frops-caddy-maintenance=.
+
+# Final stage
+FROM alpine:latest
+
+WORKDIR /app
+# Install required tools
+RUN apk add --no-cache curl
+# Copy the built binary from builder
+COPY --from=builder /build/caddy /usr/bin/caddy
+
+# Copy configuration files
+COPY benchmark/maintenance.html /app/maintenance.html
+COPY benchmark/Caddyfile-with-maintenance /etc/caddy/Caddyfile
+
+# Create necessary directories
+RUN mkdir -p /data/caddy /config/caddy
+
+# Expose ports
+EXPOSE 80 443 2019
+
+# Set environment variables
+ENV XDG_CONFIG_HOME=/config
+ENV XDG_DATA_HOME=/data
+
+# Run Caddy
+CMD ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"] 

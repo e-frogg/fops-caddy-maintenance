@@ -1,0 +1,10 @@
+
+services:
+  caddy-with-maintenance:
+    build:
+      context: ../
+      dockerfile: Dockerfile-benchmark
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
