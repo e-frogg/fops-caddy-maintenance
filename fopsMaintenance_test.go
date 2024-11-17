@@ -117,7 +117,7 @@ func TestMaintenanceHandler(t *testing.T) {
 
 func TestProvision(t *testing.T) {
 	h := &MaintenanceHandler{
-		HTMLTemplate: "build/maintenance.html",
+		HTMLTemplate: "benchmark/maintenance.html",
 	}
 	ctx := caddy.Context{}
 
