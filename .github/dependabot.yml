@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Maintenir les dépendances pour Go
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  # Maintenir les dépendances pour GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  # Maintenir les dépendances pour Docker
+  - package-ecosystem: "docker"
+    directory: "/benchmark"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10 
