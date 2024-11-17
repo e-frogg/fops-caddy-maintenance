@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  GOVERSION: '1.22'
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GOVERSION }}
+          cache-dependency-path: |
+            go.sum
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v3
+
+      - name: Test
+        run: go test -race -coverprofile=coverage.txt ./...
+
+      - name: Upload coverage results
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}

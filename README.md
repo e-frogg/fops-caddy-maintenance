@@ -2,6 +2,9 @@
 
 A Caddy server plugin that provides SEO friendly maintenance mode functionality with IP-based access control and customizable templates.
 
+![Tests](https://github.com/{owner}/{repo}/actions/workflows/tests.yml/badge.svg)
+
+
 ## 📋 Table of Contents
 
 - [Features](#features)
