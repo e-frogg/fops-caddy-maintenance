@@ -13,7 +13,7 @@ A Caddy server plugin that provides SEO friendly maintenance mode functionality 
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [API Reference](#api-reference)
-- [Performance Impact](#performance-impact)
+- [Performance Impact](#performance)
 - [Development](#development)
 
 ## ✨ Features
@@ -75,28 +75,29 @@ Add the maintenance directive to your Caddyfile:
        http://localhost:2019/maintenance/set
   ```
 
-## 📊 Performance
+## 📊 Performance Impact
 
 The maintenance module has been thoroughly benchmarked using ApacheBench with the following test conditions:
-- Intel(R) Core(TM) i3-8100T CPU @ 3.10GHz with 8gb RAM
 - 1 million requests
 - 100 concurrent connections
-- 60 seconds duration
+- Document size: 12 bytes
+- Test duration: ~73 seconds
 
 ### Benchmark Results
-
-| Metric | Vanilla Caddy | With Maintenance Module | Impact |
-|--------|---------------|------------------------|--------|
-| Requests/sec | 13,688 | 13,560 | -0.94% |
-| Time per request | 7.305ms | 7.374ms | +0.94% |
-| Failed requests | 0 | 0 | None |
 
 The maintenance module shows negligible performance impact:
 - Less than 1% decrease in request handling capacity
 - Sub-millisecond increase in response time
 - Perfect reliability maintained with zero failed requests
 
-The benchmark can be reproduced using the `run_ab_benchmark.sh` script in the `benchmark` directory.
+| Metric | Vanilla Caddy | With Maintenance Module | Impact |
+|--------|---------------|------------------------|--------|
+| Requests/sec | 13,638 | 13,528 | -0.81% |
+| Time per request | 7.332ms | 7.392ms | +0.82% |
+| Transfer rate | 1,917.91 KB/sec | 1,902.38 KB/sec | -0.81% |
+| Failed requests | 0 | 0 | None |
+
+
 
 ## 👩‍💻 Development
 
