@@ -32,6 +32,6 @@ jobs:
         run: go test -race -coverprofile=coverage.txt ./...
 
       - name: Upload coverage results
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
