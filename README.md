@@ -46,4 +46,5 @@ curl -X POST \
 ```shell
 make build
 make run
+make test
 ```

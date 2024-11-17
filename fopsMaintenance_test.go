@@ -10,6 +10,8 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMaintenanceHandler(t *testing.T) {
@@ -321,6 +323,73 @@ func TestMaintenanceHandlerTemplate(t *testing.T) {
 				if !strings.Contains(w.Body.String(), "Maintenance Mode") {
 					t.Error("response does not contain expected content")
 				}
+			}
+		})
+	}
+}
+
+func TestMaintenanceHandler_ServeHTTP_AllowedIPs(t *testing.T) {
+	tests := []struct {
+		name          string
+		allowedIPs    []string
+		clientIP      string
+		expectBlocked bool
+	}{
+		{
+			name:          "Allowed IP should bypass maintenance",
+			allowedIPs:    []string{"192.168.1.100", "10.0.0.1"},
+			clientIP:      "192.168.1.100",
+			expectBlocked: false,
+		},
+		{
+			name:          "Non-allowed IP should see maintenance page",
+			allowedIPs:    []string{"192.168.1.100", "10.0.0.1"},
+			clientIP:      "192.168.1.101",
+			expectBlocked: true,
+		},
+		{
+			name:          "Empty allowed IPs should block all",
+			allowedIPs:    []string{},
+			clientIP:      "192.168.1.100",
+			expectBlocked: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create handler with maintenance enabled
+			h := &MaintenanceHandler{
+				AllowedIPs: tt.allowedIPs,
+			}
+			h.enabledMux.Lock()
+			h.enabled = true
+			h.enabledMux.Unlock()
+
+			// Create test request with specified client IP
+			req := httptest.NewRequest("GET", "/", nil)
+			req.RemoteAddr = tt.clientIP
+
+			// Create response recorder
+			w := httptest.NewRecorder()
+
+			// Create a mock next handler that sets a specific header
+			next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+				w.Header().Set("X-Test", "passed")
+				return nil
+			})
+
+			// Serve the request
+			err := h.ServeHTTP(w, req, next)
+			require.NoError(t, err)
+
+			if tt.expectBlocked {
+				// Verify maintenance response
+				assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+				assert.Contains(t, w.Header().Get("Retry-After"), "300")
+			} else {
+				// Verify the request was passed to next handler
+				assert.Equal(t, http.StatusOK, w.Code)
+				assert.Equal(t, "passed", w.Header().Get("X-Test"))
 			}
 		})
 	}

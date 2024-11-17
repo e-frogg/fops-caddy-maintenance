@@ -23,6 +23,9 @@ type MaintenanceHandler struct {
 	// Custom HTML template for maintenance page
 	HTMLTemplate string `json:"html_template,omitempty"`
 
+	// List of IPs allowed to bypass maintenance mode
+	AllowedIPs []string `json:"allowed_ips,omitempty"`
+
 	// Maintenance mode state
 	enabled    bool
 	enabledMux sync.RWMutex
@@ -73,14 +76,20 @@ var (
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-
-	// Regular maintenance mode handling
 	h.enabledMux.RLock()
 	enabled := h.enabled
 	h.enabledMux.RUnlock()
 
 	if !enabled {
 		return next.ServeHTTP(w, r)
+	}
+
+	// Check if client IP is in allowed list
+	clientIP := r.RemoteAddr
+	for _, allowedIP := range h.AllowedIPs {
+		if clientIP == allowedIP {
+			return next.ServeHTTP(w, r)
+		}
 	}
 
 	w.Header().Set("Retry-After", "300")
@@ -154,6 +163,11 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 					return nil, h.ArgErr()
 				}
 				m.HTMLTemplate = h.Val() // This will now be treated as a file path
+			case "allowed_ips":
+				// Parse multiple IPs until the end of the line
+				for h.NextArg() {
+					m.AllowedIPs = append(m.AllowedIPs, h.Val())
+				}
 			default:
 				return nil, h.Errf("unknown subdirective '%s'", h.Val())
 			}
