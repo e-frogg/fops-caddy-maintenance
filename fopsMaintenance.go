@@ -62,15 +62,9 @@ func (h *MaintenanceHandler) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-// Validate implements caddy.Validator.
-func (h *MaintenanceHandler) Validate() error {
-	return nil
-}
-
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*MaintenanceHandler)(nil)
-	_ caddy.Validator             = (*MaintenanceHandler)(nil)
 	_ caddyhttp.MiddlewareHandler = (*MaintenanceHandler)(nil)
 )
 
