@@ -8,7 +8,7 @@ MODULE_PATH=github.com/e-frogg/frops-caddy-maintenance
 GREEN=\033[0;32m
 NC=\033[0m # No Color
 
-.PHONY: all clean build run
+.PHONY: all clean build run test
 
 all: clean build
 
@@ -27,3 +27,6 @@ run: build
 clean:
 	@echo "${GREEN}Cleaning build...${NC}"
 	@rm -rf $(BUILD_DIR)/caddy
+
+test:
+	@go test -cover -v ./...
