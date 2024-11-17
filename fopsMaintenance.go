@@ -133,17 +133,120 @@ func serveHTML(w http.ResponseWriter, template string) error {
 }
 
 const defaultHTMLTemplate = `<!DOCTYPE html>
-<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Site Maintenance</title>
+    <title>Maintenance in Progress</title>
     <meta name="robots" content="noindex">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --secondary-color: #4b5563;
+            --text-color: #1f2937;
+            --bg-color: #f3f4f6;
+            --container-bg-color: #ffffff;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background: var(--bg-color);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+        }
+        
+        .maintenance-container {
+            max-width: 500px;
+            text-align: center;
+            background: var(--container-bg-color);
+            padding: 2rem;
+            border-radius: 1rem;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            transition: box-shadow 0.3s ease-in-out;
+        }
+
+        .maintenance-container:hover {
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+        }
+        
+        .icon {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+            color: var(--primary-color);
+        }
+        
+        h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            color: var(--text-color);
+        }
+        
+        p {
+            font-size: 1.125rem;
+            color: var(--secondary-color);
+            margin-bottom: 1.5rem;
+        }
+
+        .refresh-button {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.5rem;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        .refresh-button:hover {
+            background-color: #1d4ed8;
+        }
+        
+        @media (max-width: 640px) {
+            .maintenance-container {
+                padding: 1.5rem;
+                margin: 1rem;
+            }
+            
+            h1 {
+                font-size: 1.5rem;
+            }
+            
+            p {
+                font-size: 1rem;
+            }
+            
+            .icon {
+                font-size: 3rem;
+            }
+
+            .refresh-button {
+                padding: 0.5rem 1rem;
+                font-size: 0.875rem;
+            }
+        }
+    </style>
 </head>
 <body>
-    <h1>Site Under Maintenance</h1>
-    <p>We are currently performing scheduled maintenance. Please check back later.</p>
+    <div class="maintenance-container">
+        <div class="icon">🔧</div>
+        <h1>We'll Be Back Soon!</h1>
+        <p>We're currently upgrading our system to serve you better. <br>We appreciate your patience during this brief maintenance.</p>
+        <p>Feel free to refresh the page in a few minutes.</p>
+        <button class="refresh-button" onclick="location.reload()">Refresh Page</button>
+    </div>
 </body>
 </html>`
 

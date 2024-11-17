@@ -1,0 +1,10 @@
+{
+    order maintenance first
+}
+
+localhost {
+    maintenance {
+    }
+
+    respond "Hello world!"
+}

@@ -69,7 +69,7 @@ Add the maintenance directive to your Caddyfile:
 
 | Option | Description | Required |
 |--------|-------------|----------|
-| `template` | Path to custom HTML template | Yes |
+| `template` | Path to custom HTML template | No |
 | `allowed_ips` | List of IPs that can access during maintenance | No |
 | `retry_after` | Retry-After header value in seconds | No |
 

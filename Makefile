@@ -22,7 +22,7 @@ build:
 
 run: build
 	@echo "${GREEN}Running Caddy with debug mode...${NC}"
-	@sudo DEBUG=1 ./$(BUILD_DIR)/$(BINARY_NAME) run --config ./benchmark/Caddyfile-with-maintenance
+	@sudo DEBUG=1 ./$(BUILD_DIR)/$(BINARY_NAME) run --config ./build/Caddyfile
 
 clean:
 	@echo "${GREEN}Cleaning build...${NC}"
