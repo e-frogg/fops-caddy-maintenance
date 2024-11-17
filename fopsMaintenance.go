@@ -16,7 +16,6 @@ import (
 func init() {
 	caddy.RegisterModule(&MaintenanceHandler{})
 	httpcaddyfile.RegisterHandlerDirective("maintenance", parseCaddyfile)
-	httpcaddyfile.RegisterHandlerDirective("maintenance_api", parseMaintenanceAPI)
 }
 
 // MaintenanceHandler handles maintenance mode functionality
@@ -35,7 +34,7 @@ type MaintenanceHandler struct {
 // CaddyModule returns the Caddy module information.
 func (*MaintenanceHandler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "http.handlers.fops-maintenance",
+		ID:  "http.handlers.fops_maintenance",
 		New: func() caddy.Module { return new(MaintenanceHandler) },
 	}
 }
@@ -44,6 +43,9 @@ func (*MaintenanceHandler) CaddyModule() caddy.ModuleInfo {
 func (h *MaintenanceHandler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger()
 	h.ctx = ctx
+
+	// Enregistrer l'instance
+	setMaintenanceHandler(h)
 
 	// Load template file if path is provided
 	if h.HTMLTemplate != "" {
@@ -71,12 +73,6 @@ var (
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-
-	// Check if this is an API request
-	if r.URL.Path == "/api/maintenance" {
-		h.handleAPI(w, r)
-		return nil
-	}
 
 	// Regular maintenance mode handling
 	h.enabledMux.RLock()
@@ -140,53 +136,6 @@ const defaultHTMLTemplate = `<!DOCTYPE html>
 </body>
 </html>`
 
-// API endpoints
-func (h *MaintenanceHandler) handleAPI(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		h.getMaintenanceStatus(w, r)
-	case http.MethodPost:
-		h.toggleMaintenance(w, r)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (h *MaintenanceHandler) getMaintenanceStatus(w http.ResponseWriter, r *http.Request) {
-	h.enabledMux.RLock()
-	status := h.enabled
-	h.enabledMux.RUnlock()
-
-	h.logger.Debug("maintenance: status check",
-		zap.Bool("enabled", status))
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"maintenance_enabled": status})
-}
-
-func (h *MaintenanceHandler) toggleMaintenance(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Enabled bool `json:"enabled"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.logger.Error("maintenance: failed to decode request body",
-			zap.Error(err))
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	h.enabledMux.Lock()
-	h.enabled = req.Enabled
-	h.enabledMux.Unlock()
-
-	h.logger.Info("maintenance: mode changed",
-		zap.Bool("enabled", req.Enabled))
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"maintenance_enabled": req.Enabled})
-}
-
 // parseCaddyfile parses the maintenance directive in the Caddyfile
 func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var m MaintenanceHandler
@@ -208,21 +157,6 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 			default:
 				return nil, h.Errf("unknown subdirective '%s'", h.Val())
 			}
-		}
-	}
-
-	return &m, nil
-}
-
-// parseMaintenanceAPI parses the maintenance_api directive in the Caddyfile
-func parseMaintenanceAPI(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
-	var m MaintenanceHandler
-
-	// Consume the directive token
-	if h.Next() {
-		// No arguments are expected
-		if h.NextArg() {
-			return nil, h.ArgErr()
 		}
 	}
 
