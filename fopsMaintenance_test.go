@@ -1,6 +1,7 @@
 package fopsMaintenance
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,7 @@ func TestMaintenanceHandler(t *testing.T) {
 		name           string
 		maintenanceOn  bool
 		acceptHeader   string
+		retryAfter     int
 		expectedStatus int
 		expectedType   string
 	}{
@@ -44,6 +46,14 @@ func TestMaintenanceHandler(t *testing.T) {
 			expectedStatus: http.StatusServiceUnavailable,
 			expectedType:   "application/json",
 		},
+		{
+			name:           "Maintenance On - Custom Retry After",
+			maintenanceOn:  true,
+			acceptHeader:   "text/html",
+			retryAfter:     600,
+			expectedStatus: http.StatusServiceUnavailable,
+			expectedType:   "text/html; charset=utf-8",
+		},
 	}
 
 	for _, tt := range tests {
@@ -51,6 +61,7 @@ func TestMaintenanceHandler(t *testing.T) {
 			// Create handler
 			h := &MaintenanceHandler{
 				HTMLTemplate: defaultHTMLTemplate,
+				RetryAfter:   tt.retryAfter,
 			}
 
 			// Set maintenance mode
@@ -90,6 +101,15 @@ func TestMaintenanceHandler(t *testing.T) {
 				if contentType != tt.expectedType {
 					t.Errorf("expected Content-Type %s; got %s", tt.expectedType, contentType)
 				}
+			}
+
+			// Add check for Retry-After header
+			if tt.maintenanceOn {
+				expectedRetryAfter := "300" // default value
+				if tt.retryAfter > 0 {
+					expectedRetryAfter = fmt.Sprintf("%d", tt.retryAfter)
+				}
+				assert.Equal(t, expectedRetryAfter, w.Header().Get("Retry-After"))
 			}
 		})
 	}
@@ -387,7 +407,6 @@ func TestMaintenanceHandler_ServeHTTP_AllowedIPs(t *testing.T) {
 			if tt.expectBlocked {
 				// Verify maintenance response
 				assert.Equal(t, http.StatusServiceUnavailable, w.Code)
-				assert.Contains(t, w.Header().Get("Retry-After"), "300")
 			} else {
 				// Verify the request was passed to next handler
 				assert.Equal(t, http.StatusOK, w.Code)
@@ -461,6 +480,52 @@ func TestParseCaddyfile(t *testing.T) {
 			}`,
 			expectErr: true,
 		},
+		{
+			name: "With retry_after configuration",
+			input: `maintenance {
+				retry_after 600
+			}`,
+			expectedM: &MaintenanceHandler{
+				RetryAfter: 600,
+			},
+		},
+		{
+			name: "Complete configuration with retry_after",
+			input: `maintenance {
+				template /path/to/template.html
+				allowed_ips 192.168.1.100 10.0.0.1
+				retry_after 600
+			}`,
+			expectedM: &MaintenanceHandler{
+				HTMLTemplate: "/path/to/template.html",
+				AllowedIPs:   []string{"192.168.1.100", "10.0.0.1"},
+				RetryAfter:   600,
+			},
+		},
+		{
+			name: "Invalid retry_after value",
+			input: `maintenance {
+				retry_after invalid
+			}`,
+			expectErr:     true,
+			expectedErrIs: "invalid retry_after value",
+		},
+		{
+			name: "Negative retry_after value",
+			input: `maintenance {
+				retry_after -1
+			}`,
+			expectErr:     true,
+			expectedErrIs: "retry_after value must be positive",
+		},
+		{
+			name: "retry_after without value",
+			input: `maintenance {
+				retry_after
+			}`,
+			expectErr:     true,
+			expectedErrIs: "wrong argument count",
+		},
 	}
 
 	for _, tt := range tests {
@@ -489,6 +554,7 @@ func TestParseCaddyfile(t *testing.T) {
 			// Compare fields
 			assert.Equal(t, tt.expectedM.HTMLTemplate, actualHandler.HTMLTemplate)
 			assert.Equal(t, tt.expectedM.AllowedIPs, actualHandler.AllowedIPs)
+			assert.Equal(t, tt.expectedM.RetryAfter, actualHandler.RetryAfter)
 		})
 	}
 }

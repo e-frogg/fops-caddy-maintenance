@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 
 	"github.com/caddyserver/caddy/v2"
@@ -25,6 +26,9 @@ type MaintenanceHandler struct {
 
 	// List of IPs allowed to bypass maintenance mode
 	AllowedIPs []string `json:"allowed_ips,omitempty"`
+
+	// Retry-After header value in seconds
+	RetryAfter int `json:"retry_after,omitempty"`
 
 	// Maintenance mode state
 	enabled    bool
@@ -86,8 +90,12 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 		}
 	}
 
-	w.Header().Set("Retry-After", "300")
-	w.Header().Set("X-Robots-Tag", "noindex")
+	// Set Retry-After header with default value if not specified
+	retryAfter := defaultRetryAfter
+	if h.RetryAfter > 0 {
+		retryAfter = h.RetryAfter
+	}
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
 
 	// Check if client accepts JSON
 	if isJSONRequest(r) {
@@ -139,6 +147,8 @@ const defaultHTMLTemplate = `<!DOCTYPE html>
 </body>
 </html>`
 
+const defaultRetryAfter = 300
+
 // parseCaddyfile parses the maintenance directive in the Caddyfile
 func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var m MaintenanceHandler
@@ -162,6 +172,18 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 				for h.NextArg() {
 					m.AllowedIPs = append(m.AllowedIPs, h.Val())
 				}
+			case "retry_after":
+				if !h.NextArg() {
+					return nil, h.ArgErr()
+				}
+				val, err := strconv.Atoi(h.Val())
+				if err != nil {
+					return nil, h.Errf("invalid retry_after value: %v", err)
+				}
+				if val <= 0 {
+					return nil, h.Errf("retry_after value must be positive")
+				}
+				m.RetryAfter = val
 			default:
 				return nil, h.Errf("unknown subdirective '%s'", h.Val())
 			}
