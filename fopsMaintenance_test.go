@@ -3,6 +3,9 @@ package fopsMaintenance
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/caddyserver/caddy/v2"
@@ -238,29 +241,87 @@ func TestMaintenanceHandlerDifferentMethods(t *testing.T) {
 	}
 }
 
-/*
 func TestMaintenanceHandlerTemplate(t *testing.T) {
+	// Create test files
+	validHTML := `<!DOCTYPE html>
+	<html>
+		<body>
+			<h1>Maintenance Mode</h1>
+			<p>The site is currently under maintenance.</p>
+		</body>
+	</html>`
+
+	// Create test directories and files
+	testDir := "testdata"
+	err := os.MkdirAll(testDir, 0755)
+	if err != nil {
+		t.Fatalf("Failed to create test directory: %v", err)
+	}
+	defer os.RemoveAll(testDir)
+
+	// Write test file
+	err = os.WriteFile(filepath.Join(testDir, "valid.html"), []byte(validHTML), 0644)
+	if err != nil {
+		t.Fatalf("Failed to write valid HTML: %v", err)
+	}
+
 	tests := []struct {
 		name          string
 		templatePath  string
 		expectedError bool
 	}{
 		{
-			name:          "Valid Template",
-			templatePath:  "testdata/valid.html",
+			name:          "Valid HTML File",
+			templatePath:  filepath.Join(testDir, "valid.html"),
 			expectedError: false,
 		},
 		{
-			name:          "Invalid Template Path",
+			name:          "Non-existent File",
 			templatePath:  "nonexistent.html",
 			expectedError: true,
 		},
-		{
-			name:          "Malformed Template",
-			templatePath:  "testdata/malformed.html",
-			expectedError: true,
-		},
 	}
-	// ... logique de test
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &MaintenanceHandler{
+				HTMLTemplate: tt.templatePath,
+			}
+
+			// Test Provision
+			err := h.Provision(caddy.Context{})
+
+			// Check if error matches expectation
+			if tt.expectedError && err == nil {
+				t.Errorf("expected error but got none")
+			}
+			if !tt.expectedError && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+
+			// For valid file, test content
+			if !tt.expectedError && err == nil {
+				req := httptest.NewRequest("GET", "http://example.com", nil)
+				req.Header.Set("Accept", "text/html")
+				w := httptest.NewRecorder()
+
+				h.enabledMux.Lock()
+				h.enabled = true
+				h.enabledMux.Unlock()
+
+				next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+					return nil
+				})
+
+				err = h.ServeHTTP(w, req, next)
+				if err != nil {
+					t.Errorf("ServeHTTP returned unexpected error: %v", err)
+				}
+
+				if !strings.Contains(w.Body.String(), "Maintenance Mode") {
+					t.Error("response does not contain expected content")
+				}
+			}
+		})
+	}
 }
-*/
