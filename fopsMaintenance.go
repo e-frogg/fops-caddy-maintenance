@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
@@ -33,6 +34,9 @@ type MaintenanceHandler struct {
 	// Maintenance mode state
 	enabled    bool
 	enabledMux sync.RWMutex
+
+	// Durée de rétention des requêtes en mode rétention (en secondes)
+	RequestRetentionModeTimeout int `json:"request_retention_mode_timeout,omitempty"`
 
 	logger *zap.Logger
 	ctx    caddy.Context
@@ -76,6 +80,7 @@ var (
 func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	h.enabledMux.RLock()
 	enabled := h.enabled
+	temporaryModeEnabled := h.RequestRetentionModeTimeout > 0
 	h.enabledMux.RUnlock()
 
 	if !enabled {
@@ -102,7 +107,46 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 		return serveJSON(w)
 	}
 
-	return serveHTML(w, h.HTMLTemplate)
+	if temporaryModeEnabled {
+		// Mode temporaire activé, retenir la requête
+		timer := time.NewTimer(time.Duration(h.RequestRetentionModeTimeout) * time.Second)
+		for {
+			select {
+			case <-timer.C:
+				h.enabledMux.RLock()
+				enabled := h.enabled
+				h.enabledMux.RUnlock()
+				if !enabled {
+					// Mode maintenance désactivé, transférer la requête
+					return next.ServeHTTP(w, r)
+				}
+
+				// Timeout atteint, afficher la page de maintenance
+				return serveHTML(w, h.HTMLTemplate)
+			case <-h.ctx.Done():
+				// Contexte annulé, vérifier l'état "enabled"
+				h.enabledMux.RLock()
+				enabled := h.enabled
+				h.enabledMux.RUnlock()
+				if !enabled {
+					// Mode maintenance désactivé, transférer la requête
+					return next.ServeHTTP(w, r)
+				}
+			case <-time.After(1000 * time.Millisecond):
+				// Vérifier périodiquement l'état "enabled" toutes les 1000ms
+				h.enabledMux.RLock()
+				enabled := h.enabled
+				h.enabledMux.RUnlock()
+				if !enabled {
+					// Mode maintenance désactivé, transférer la requête
+					return next.ServeHTTP(w, r)
+				}
+			}
+		}
+	} else {
+		// Mode maintenance complet, afficher la page de maintenance
+		return serveHTML(w, h.HTMLTemplate)
+	}
 }
 
 func isJSONRequest(r *http.Request) bool {
@@ -287,6 +331,18 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 					return nil, h.Errf("retry_after value must be positive")
 				}
 				m.RetryAfter = val
+			case "request_retention_mode_timeout":
+				if !h.NextArg() {
+					return nil, h.ArgErr()
+				}
+				val, err := strconv.Atoi(h.Val())
+				if err != nil {
+					return nil, h.Errf("invalid request_retention_mode_timeout value: %v", err)
+				}
+				if val <= 0 {
+					return nil, h.Errf("request_retention_mode_timeout value must be positive")
+				}
+				m.RequestRetentionModeTimeout = val
 			default:
 				return nil, h.Errf("unknown subdirective '%s'", h.Val())
 			}

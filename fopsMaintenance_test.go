@@ -1,6 +1,7 @@
 package fopsMaintenance
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -555,6 +556,124 @@ func TestParseCaddyfile(t *testing.T) {
 			assert.Equal(t, tt.expectedM.HTMLTemplate, actualHandler.HTMLTemplate)
 			assert.Equal(t, tt.expectedM.AllowedIPs, actualHandler.AllowedIPs)
 			assert.Equal(t, tt.expectedM.RetryAfter, actualHandler.RetryAfter)
+		})
+	}
+}
+
+func TestMaintenanceHandlerRequestRetentionMode(t *testing.T) {
+	// Test cases
+	tests := []struct {
+		name                        string
+		maintenanceOn               bool
+		requestRetentionModeTimeout int
+		expectedStatus              int
+		expectedType                string
+	}{
+		{
+			name:                        "Request Retention Mode - Maintenance On",
+			maintenanceOn:               true,
+			requestRetentionModeTimeout: 2,
+			expectedStatus:              http.StatusServiceUnavailable,
+			expectedType:                "text/html; charset=utf-8",
+		},
+		{
+			name:                        "Request Retention Mode - Maintenance Off",
+			maintenanceOn:               false,
+			requestRetentionModeTimeout: 2,
+			expectedStatus:              http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
+			defer cancel()
+
+			h := &MaintenanceHandler{
+				HTMLTemplate:                defaultHTMLTemplate,
+				RequestRetentionModeTimeout: tt.requestRetentionModeTimeout,
+				ctx:                         ctx,
+			}
+
+			// Set maintenance mode
+			h.enabledMux.Lock()
+			h.enabled = tt.maintenanceOn
+			h.enabledMux.Unlock()
+
+			// Create test request
+			req := httptest.NewRequest("GET", "http://example.com", nil)
+
+			// Create response recorder
+			w := httptest.NewRecorder()
+
+			// Create next handler that always returns 200 OK
+			next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+				w.WriteHeader(http.StatusOK)
+				return nil
+			})
+
+			// Execute handler
+			err := h.ServeHTTP(w, req, next)
+			if err != nil {
+				t.Errorf("ServeHTTP returned unexpected error: %v", err)
+			}
+
+			// Check status code
+			if w.Code != tt.expectedStatus {
+				t.Errorf("expected status %d; got %d", tt.expectedStatus, w.Code)
+			}
+
+			// Check content type if specified
+			if tt.expectedType != "" {
+				contentType := w.Header().Get("Content-Type")
+				if contentType != tt.expectedType {
+					t.Errorf("expected Content-Type %s; got %s", tt.expectedType, contentType)
+				}
+			}
+		})
+	}
+}
+
+func TestParseCaddyfileRequestRetentionModeTimeout(t *testing.T) {
+	// Test cases
+	tests := []struct {
+		name                 string
+		input                string
+		expectedTimeout      int
+		expectedErrorMessage string
+	}{
+		{
+			name:            "Valid request_retention_mode_timeout",
+			input:           "maintenance {\nrequest_retention_mode_timeout 60\n}",
+			expectedTimeout: 60,
+		},
+		{
+			name:                 "Invalid request_retention_mode_timeout",
+			input:                "maintenance {\nrequest_retention_mode_timeout invalid\n}",
+			expectedErrorMessage: "invalid request_retention_mode_timeout value",
+		},
+		{
+			name:                 "Negative request_retention_mode_timeout",
+			input:                "maintenance {\nrequest_retention_mode_timeout -10\n}",
+			expectedErrorMessage: "request_retention_mode_timeout value must be positive",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := httpcaddyfile.Helper{
+				Dispenser: caddyfile.NewTestDispenser(tt.input),
+			}
+
+			m, err := parseCaddyfile(h)
+
+			if tt.expectedErrorMessage != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectedErrorMessage)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedTimeout, m.(*MaintenanceHandler).RequestRetentionModeTimeout)
+			}
 		})
 	}
 }

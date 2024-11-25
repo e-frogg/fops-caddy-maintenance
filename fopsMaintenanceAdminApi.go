@@ -70,7 +70,8 @@ func (h AdminHandler) toggle(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	var req struct {
-		Enabled bool `json:"enabled"`
+		Enabled                     bool `json:"enabled"`
+		RequestRetentionModeTimeout int  `json:"request_retention_mode_timeout,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -90,6 +91,7 @@ func (h AdminHandler) toggle(w http.ResponseWriter, r *http.Request) error {
 
 	maintenanceHandler.enabledMux.Lock()
 	maintenanceHandler.enabled = req.Enabled
+	maintenanceHandler.RequestRetentionModeTimeout = req.RequestRetentionModeTimeout
 	maintenanceHandler.enabledMux.Unlock()
 
 	return json.NewEncoder(w).Encode(map[string]bool{
