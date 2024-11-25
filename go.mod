@@ -4,7 +4,7 @@ go 1.22
 
 require (
 	github.com/caddyserver/caddy/v2 v2.8.4
-	github.com/stretchr/testify v1.9.0
+	github.com/stretchr/testify v1.10.0
 	go.uber.org/zap v1.27.0
 )
 
