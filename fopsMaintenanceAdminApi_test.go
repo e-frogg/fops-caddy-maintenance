@@ -53,7 +53,10 @@ func TestAdminHandler_Toggle(t *testing.T) {
 	setMaintenanceHandler(maintenanceHandler)
 
 	// Create test request body
-	body := map[string]bool{"enabled": true}
+	body := map[string]interface{}{
+		"enabled":                        true,
+		"request_retention_mode_timeout": 60,
+	}
 	bodyBytes, _ := json.Marshal(body)
 
 	// Create test request
@@ -66,9 +69,18 @@ func TestAdminHandler_Toggle(t *testing.T) {
 		t.Fatalf("Expected no error, got %v", err)
 	}
 
-	// Verify handler state changed
-	if !maintenanceHandler.enabled {
+	// Verify response
+	var response map[string]bool
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if !response["enabled"] {
 		t.Error("Expected maintenance mode to be enabled")
+	}
+
+	if maintenanceHandler.RequestRetentionModeTimeout != 60 {
+		t.Errorf("Expected request retention mode timeout to be 60, got %d", maintenanceHandler.RequestRetentionModeTimeout)
 	}
 }
 
@@ -99,7 +111,7 @@ func TestAdminHandler_GetStatus_NoHandler(t *testing.T) {
 
 func TestAdminHandler_Toggle_InvalidBody(t *testing.T) {
 	handler := AdminHandler{}
-	invalidJSON := []byte(`{"enabled": invalid}`)
+	invalidJSON := []byte(`{"enabled": invalid, "request_retention_mode_timeout": "invalid"}`)
 
 	req := httptest.NewRequest(http.MethodPost, "/maintenance/set", bytes.NewBuffer(invalidJSON))
 	w := httptest.NewRecorder()
@@ -107,6 +119,15 @@ func TestAdminHandler_Toggle_InvalidBody(t *testing.T) {
 	err := handler.toggle(w, req)
 	if err == nil {
 		t.Error("Expected error for invalid JSON body")
+	}
+
+	apiErr, ok := err.(caddy.APIError)
+	if !ok {
+		t.Error("Expected caddy.APIError type")
+	}
+
+	if ok && apiErr.HTTPStatus != http.StatusBadRequest {
+		t.Errorf("Expected status code %d, got %d", http.StatusBadRequest, apiErr.HTTPStatus)
 	}
 }
 

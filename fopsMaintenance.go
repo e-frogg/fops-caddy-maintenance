@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
@@ -34,6 +35,9 @@ type MaintenanceHandler struct {
 	enabled    bool
 	enabledMux sync.RWMutex
 
+	// Request retention mode timeout in seconds
+	RequestRetentionModeTimeout int `json:"request_retention_mode_timeout,omitempty"`
+
 	logger *zap.Logger
 	ctx    caddy.Context
 }
@@ -51,7 +55,7 @@ func (h *MaintenanceHandler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger()
 	h.ctx = ctx
 
-	// Enregistrer l'instance
+	// Register the maintenance handler
 	setMaintenanceHandler(h)
 
 	// Load template file if path is provided
@@ -76,6 +80,7 @@ var (
 func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	h.enabledMux.RLock()
 	enabled := h.enabled
+	temporaryModeEnabled := h.RequestRetentionModeTimeout > 0
 	h.enabledMux.RUnlock()
 
 	if !enabled {
@@ -90,18 +95,52 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 		}
 	}
 
+	// Request retention mode disabled, serve maintenance page now
+	if !temporaryModeEnabled {
+		return serveMaintenancePage(r, w, h)
+	}
+
+	// Request retention mode enabled, retain request for the predefined period
+	timer := time.NewTimer(time.Duration(h.RequestRetentionModeTimeout) * time.Second)
+	for {
+		// Wait for the timer to expire, the context to be cancelled or the maintenance mode to be disabled
+		// Context can be cancelled in several real-world scenarios:
+		// Client connection closed, Caddy config reload, Server graceful shutdown (SIGTERM)....
+		select {
+		// Timeout reached, serve maintenance page
+		case <-timer.C:
+			return serveMaintenancePage(r, w, h)
+		// Context cancelled, serve maintenance page
+		case <-h.ctx.Done():
+			return serveMaintenancePage(r, w, h)
+		// Check every second the "enabled" state
+		case <-time.After(1000 * time.Millisecond):
+			h.enabledMux.RLock()
+			enabled := h.enabled
+			h.enabledMux.RUnlock()
+			if !enabled {
+				// Mode maintenance désactivé, transférer la requête
+				return next.ServeHTTP(w, r)
+			}
+		}
+	}
+}
+
+func serveMaintenancePage(r *http.Request, w http.ResponseWriter, h *MaintenanceHandler) error {
 	// Set Retry-After header with default value if not specified
 	retryAfter := defaultRetryAfter
 	if h.RetryAfter > 0 {
 		retryAfter = h.RetryAfter
 	}
 	w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+	w.WriteHeader(http.StatusServiceUnavailable)
 
 	// Check if client accepts JSON
 	if isJSONRequest(r) {
 		return serveJSON(w)
 	}
 
+	// Serve HTML maintenance page
 	return serveHTML(w, h.HTMLTemplate)
 }
 
@@ -112,7 +151,6 @@ func isJSONRequest(r *http.Request) bool {
 
 func serveJSON(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusServiceUnavailable)
 
 	response := map[string]string{
 		"status":  "error",
@@ -123,7 +161,6 @@ func serveJSON(w http.ResponseWriter) error {
 
 func serveHTML(w http.ResponseWriter, template string) error {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusServiceUnavailable)
 
 	if template == "" {
 		template = defaultHTMLTemplate
@@ -287,6 +324,18 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 					return nil, h.Errf("retry_after value must be positive")
 				}
 				m.RetryAfter = val
+			case "request_retention_mode_timeout":
+				if !h.NextArg() {
+					return nil, h.ArgErr()
+				}
+				val, err := strconv.Atoi(h.Val())
+				if err != nil {
+					return nil, h.Errf("invalid request_retention_mode_timeout value: %v", err)
+				}
+				if val <= 0 {
+					return nil, h.Errf("request_retention_mode_timeout value must be positive")
+				}
+				m.RequestRetentionModeTimeout = val
 			default:
 				return nil, h.Errf("unknown subdirective '%s'", h.Val())
 			}

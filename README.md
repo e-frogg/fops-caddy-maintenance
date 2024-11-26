@@ -42,6 +42,14 @@
 - Custom HTML template support
 - Configurable retry period
 
+## 💡 Benefits
+- Centralized control through Caddy
+- No need to modify application code
+- Clean customised user experience during maintenance
+- SEO friendly interruption
+- Perfect for containerized architectures
+- Reduced manual intervention needs
+
 ## 🔧 Build caddy with plugin
 
   ```shell
@@ -90,6 +98,15 @@ Add the maintenance directive to your Caddyfile:
        http://localhost:2019/maintenance/set
   ```
 
+### Enable Maintenance Mode with request retention for 10 seconds
+
+  ```shell
+  curl -X POST \
+       -H "Content-Type: application/json" \
+       -d '{"enabled": true, "request_retention_mode_timeout": 10}' \
+       http://localhost:2019/maintenance/set
+  ```
+
 ### Disable Maintenance Mode
 
   ```shell
@@ -99,38 +116,14 @@ Add the maintenance directive to your Caddyfile:
        http://localhost:2019/maintenance/set
   ```
 
-## 📊 Performance Impact
-
-The maintenance module has been thoroughly benchmarked using ApacheBench with the following test conditions:
-- 1 million requests
-- 100 concurrent connections
-- Document size: 12 bytes
-- Test duration: ~73 seconds
-
-### Benchmark Results
-
-The maintenance module shows negligible performance impact:
-- Less than 1% decrease in request handling capacity
-- Sub-millisecond increase in response time
-- Perfect reliability maintained with zero failed requests
-
-| Metric | Vanilla Caddy | With Maintenance Module | Impact |
-|--------|---------------|------------------------|--------|
-| Requests/sec | 13,638 | 13,528 | -0.81% |
-| Time per request | 7.332ms | 7.392ms | +0.82% |
-| Transfer rate | 1,917.91 KB/sec | 1,902.38 KB/sec | -0.81% |
-| Failed requests | 0 | 0 | None |
-
 ## Real World Use Cases
 
 ### Website Maintenance Management Made Easy
 
-Managing maintenance windows for any web platform can be challenging, especially in modern architectures. Here's how this plugin simplifies the process:
-
 **Scenario**: 
 - Web platform running as a Docker stack
 - Caddy serving as the main entry point/reverse proxy
-- Need for controlled maintenance periods to deploy new versions of the application
+- Need for controlled maintenance periods to deploy new release or perform maintenance tasks
 
 **Solution**:
 The maintenance plugin enables seamless maintenance mode activation by:
@@ -140,12 +133,18 @@ The maintenance plugin enables seamless maintenance mode activation by:
 4. Safely performing required maintenance tasks, deployment, container rebuilds, etc.
 5. Restoring service when ready
 
-**Benefits**:
-- Centralized control through Caddy
-- No need to modify application code
-- Clean customised user experience during maintenance
-- SEO friendly interruption
-- Perfect for containerized architectures
+### Micro Maintenance with requests retention
+
+**Scenario**: 
+- Web platform running as a Docker stack
+- Caddy serving as the main entry point/reverse proxy
+- Need for short maintenance periods to perform quick tasks without service interruption
+
+**Solution**:
+1. Toggling maintenance on through API call to Caddy's admin interface with request retention timeout configuration 
+2. Caddy instantly retain incoming requests for the predefined period until maintenance mode is disabled or display a maintenance page if timeout is reached
+3. Toggling maintenance off through API, the retained requests are released and forwarded to the backend
+
 
 ### Automated Maintenance Based on Critical Services Health
 
@@ -163,13 +162,6 @@ The maintenance plugin can be integrated with Docker health checks:
 2. Custom script watches for health status changes
 3. Maintenance mode automatically triggered when critical service fails
 4. System remains protected until services are healthy again
-
-**Benefits**:
-- Automatic protection of system integrity
-- Immediate response to infrastructure issues
-- Clear communication to end users
-- Prevention of data corruption
-- Reduced manual intervention needs
 
 
 ## 👩‍💻 Development
