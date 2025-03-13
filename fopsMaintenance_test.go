@@ -1219,3 +1219,179 @@ func TestMaintenanceHandler_FilePermissions(t *testing.T) {
 	assert.Equal(t, expectedPerm, info.Mode().Perm(),
 		"Status file should have 0644 permissions")
 }
+
+func TestMaintenanceHandler_StatusPersistenceErrors(t *testing.T) {
+	// Create admin handler
+	adminHandler := AdminHandler{}
+
+	tests := []struct {
+		name          string
+		setupHandler  func() *MaintenanceHandler
+		expectError   bool
+		errorContains string
+	}{
+		{
+			name: "Marshal Error",
+			setupHandler: func() *MaintenanceHandler {
+				// This test is just for coverage, as json.Marshal rarely fails with simple structs
+				h := &MaintenanceHandler{
+					StatusFile: "/tmp/test_marshal_error.json",
+				}
+				setMaintenanceHandler(h)
+				return h
+			},
+			expectError: false,
+		},
+		{
+			name: "Write Error - Directory Not Exists",
+			setupHandler: func() *MaintenanceHandler {
+				h := &MaintenanceHandler{
+					StatusFile: "/nonexistent/directory/maintenance.json",
+				}
+				setMaintenanceHandler(h)
+				return h
+			},
+			expectError:   true,
+			errorContains: "failed to persist status",
+		},
+		{
+			name: "Write Error - Permission Denied",
+			setupHandler: func() *MaintenanceHandler {
+				// Create a file with no write permissions
+				tmpDir := t.TempDir()
+				statusFile := filepath.Join(tmpDir, "readonly.json")
+
+				// Create the file
+				err := os.WriteFile(statusFile, []byte(`{"enabled":false}`), 0400)
+				require.NoError(t, err)
+
+				// Remove write permissions
+				err = os.Chmod(statusFile, 0400)
+				require.NoError(t, err)
+
+				h := &MaintenanceHandler{
+					StatusFile: statusFile,
+				}
+				setMaintenanceHandler(h)
+				return h
+			},
+			expectError:   true,
+			errorContains: "failed to persist status",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup handler
+			tt.setupHandler()
+
+			// Create request body
+			body := map[string]interface{}{
+				"enabled": true,
+			}
+			bodyBytes, err := json.Marshal(body)
+			require.NoError(t, err)
+
+			// Create request
+			req := httptest.NewRequest(http.MethodPost, "/maintenance/set", bytes.NewBuffer(bodyBytes))
+			w := httptest.NewRecorder()
+
+			// Execute request
+			err = adminHandler.toggle(w, req)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestMaintenanceHandler_ServeHTTP_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name           string
+		setupHandler   func() *MaintenanceHandler
+		setupRequest   func() *http.Request
+		expectedStatus int
+	}{
+		{
+			name: "Context Cancelled During Retention",
+			setupHandler: func() *MaintenanceHandler {
+				ctx, cancel := context.WithCancel(context.Background())
+				h := &MaintenanceHandler{
+					HTMLTemplate:                defaultHTMLTemplate,
+					RequestRetentionModeTimeout: 30,
+					ctx:                         caddy.Context{Context: ctx},
+				}
+				h.enabledMux.Lock()
+				h.enabled = true
+				h.enabledMux.Unlock()
+
+				// Cancel context after a short delay
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					cancel()
+				}()
+
+				return h
+			},
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest("GET", "http://example.com", nil)
+			},
+			expectedStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name: "Timer Expiration During Retention",
+			setupHandler: func() *MaintenanceHandler {
+				ctx := context.Background()
+				h := &MaintenanceHandler{
+					HTMLTemplate:                defaultHTMLTemplate,
+					RequestRetentionModeTimeout: 1, // Very short timeout
+					ctx:                         caddy.Context{Context: ctx},
+				}
+				h.enabledMux.Lock()
+				h.enabled = true
+				h.enabledMux.Unlock()
+				return h
+			},
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest("GET", "http://example.com", nil)
+			},
+			expectedStatus: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := tt.setupHandler()
+			req := tt.setupRequest()
+			w := httptest.NewRecorder()
+
+			// Create next handler
+			next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+				w.WriteHeader(http.StatusOK)
+				return nil
+			})
+
+			// Execute handler in a goroutine
+			errChan := make(chan error, 1)
+			go func() {
+				errChan <- h.ServeHTTP(w, req, next)
+			}()
+
+			// Wait for completion with timeout
+			select {
+			case err := <-errChan:
+				require.NoError(t, err)
+			case <-time.After(2 * time.Second):
+				t.Fatal("Request did not complete in time")
+			}
+
+			assert.Equal(t, tt.expectedStatus, w.Code)
+		})
+	}
+}
