@@ -80,6 +80,9 @@ Add the maintenance directive to your Caddyfile:
 | `template` | Path to custom HTML template | No |
 | `allowed_ips` | List of IPs that can access during maintenance | No |
 | `retry_after` | Retry-After header value in seconds | No |
+| `default_enabled` | Enable maintenance mode by default at startup | No |
+| `status_file` | Path to file for persisting maintenance status | No |
+| `request_retention_mode_timeout` | Time in seconds to retain requests during maintenance | No |
 
 ## 🚀 API Reference
 
@@ -115,6 +118,37 @@ Add the maintenance directive to your Caddyfile:
        -d '{"enabled": false}' \
        http://localhost:2019/maintenance/set
   ```
+
+## Advanced Configuration Examples
+
+### Default Maintenance Mode for Pre-production Environments
+
+```caddy
+preprod.example.com {
+  maintenance {
+    # Enable maintenance by default at startup
+    default_enabled true
+    # Allow specific IPs to access during maintenance
+    allowed_ips 192.168.1.100 10.0.0.1
+    # Custom template
+    template "/path/to/template.html"
+  }
+}
+```
+
+### Persistent Maintenance Status
+
+```caddy
+example.com {
+  maintenance {
+    # Persist maintenance status to survive restarts
+    status_file /var/lib/caddy/maintenance.json
+    # Retry-After header value in seconds
+    retry_after 300
+  }
+}
+```
+
 
 ## Real World Use Cases
 

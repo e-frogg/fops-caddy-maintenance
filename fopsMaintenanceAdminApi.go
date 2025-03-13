@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/caddyserver/caddy/v2"
@@ -93,6 +94,28 @@ func (h AdminHandler) toggle(w http.ResponseWriter, r *http.Request) error {
 	maintenanceHandler.enabled = req.Enabled
 	maintenanceHandler.RequestRetentionModeTimeout = req.RequestRetentionModeTimeout
 	maintenanceHandler.enabledMux.Unlock()
+
+	// Persist status if StatusFile is configured
+	if maintenanceHandler.StatusFile != "" {
+		status := struct {
+			Enabled bool `json:"enabled"`
+		}{
+			Enabled: req.Enabled,
+		}
+		data, err := json.Marshal(status)
+		if err != nil {
+			return caddy.APIError{
+				HTTPStatus: http.StatusInternalServerError,
+				Err:        fmt.Errorf("failed to marshal status: %v", err),
+			}
+		}
+		if err := os.WriteFile(maintenanceHandler.StatusFile, data, 0644); err != nil {
+			return caddy.APIError{
+				HTTPStatus: http.StatusInternalServerError,
+				Err:        fmt.Errorf("failed to persist status: %v", err),
+			}
+		}
+	}
 
 	return json.NewEncoder(w).Encode(map[string]bool{
 		"enabled": req.Enabled,

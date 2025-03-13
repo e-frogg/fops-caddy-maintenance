@@ -1,7 +1,9 @@
 package fopsMaintenance
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -828,4 +830,392 @@ func TestMaintenanceHandlerRequestRetentionModeWithPeriodicCheck(t *testing.T) {
 	// Verify that the request was processed by the next handler
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "request-processed", w.Header().Get("X-Test"))
+}
+
+func TestMaintenanceHandler_DefaultEnabled(t *testing.T) {
+	tests := []struct {
+		name           string
+		defaultEnabled bool
+		expectedState  bool
+	}{
+		{
+			name:           "Default Enabled True",
+			defaultEnabled: true,
+			expectedState:  true,
+		},
+		{
+			name:           "Default Enabled False",
+			defaultEnabled: false,
+			expectedState:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &MaintenanceHandler{
+				DefaultEnabled: tt.defaultEnabled,
+			}
+
+			ctx := caddy.Context{}
+			err := h.Provision(ctx)
+			require.NoError(t, err)
+
+			h.enabledMux.RLock()
+			state := h.enabled
+			h.enabledMux.RUnlock()
+
+			assert.Equal(t, tt.expectedState, state, "Maintenance state should match DefaultEnabled")
+		})
+	}
+}
+
+func TestMaintenanceHandler_StatusFile(t *testing.T) {
+	// Create temporary directory for test files
+	tmpDir := t.TempDir()
+
+	tests := []struct {
+		name           string
+		setupFile      bool
+		fileContent    string
+		defaultEnabled bool
+		expectedState  bool
+	}{
+		{
+			name:           "Load Enabled State from File",
+			setupFile:      true,
+			fileContent:    `{"enabled": true}`,
+			defaultEnabled: false,
+			expectedState:  true,
+		},
+		{
+			name:           "Load Disabled State from File",
+			setupFile:      true,
+			fileContent:    `{"enabled": false}`,
+			defaultEnabled: true,
+			expectedState:  false,
+		},
+		{
+			name:           "Invalid JSON in File",
+			setupFile:      true,
+			fileContent:    `invalid json`,
+			defaultEnabled: true,
+			expectedState:  true,
+		},
+		{
+			name:           "No File Present",
+			setupFile:      false,
+			defaultEnabled: true,
+			expectedState:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a unique file for each test case
+			statusFile := filepath.Join(tmpDir, fmt.Sprintf("status_%s.json", strings.ReplaceAll(tt.name, " ", "_")))
+
+			// Setup status file if needed
+			if tt.setupFile {
+				err := os.WriteFile(statusFile, []byte(tt.fileContent), 0644)
+				require.NoError(t, err, "Failed to write status file")
+			}
+
+			// Create and provision handler
+			h := &MaintenanceHandler{
+				DefaultEnabled: tt.defaultEnabled,
+				StatusFile:     statusFile,
+			}
+
+			ctx := caddy.Context{}
+			err := h.Provision(ctx)
+			require.NoError(t, err, "Failed to provision handler")
+
+			// Check state
+			h.enabledMux.RLock()
+			state := h.enabled
+			h.enabledMux.RUnlock()
+
+			assert.Equal(t, tt.expectedState, state, "Maintenance state does not match expected state")
+		})
+	}
+}
+
+func TestMaintenanceHandler_StatusPersistence(t *testing.T) {
+	// Create temporary directory
+	tmpDir := t.TempDir()
+	statusFile := filepath.Join(tmpDir, "maintenance_status.json")
+
+	// Create admin handler
+	adminHandler := AdminHandler{}
+
+	tests := []struct {
+		name          string
+		enabled       bool
+		expectError   bool
+		checkContent  bool
+		expectEnabled bool
+	}{
+		{
+			name:          "Enable Maintenance",
+			enabled:       true,
+			expectError:   false,
+			checkContent:  true,
+			expectEnabled: true,
+		},
+		{
+			name:          "Disable Maintenance",
+			enabled:       false,
+			expectError:   false,
+			checkContent:  true,
+			expectEnabled: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup maintenance handler
+			maintenanceHandler := &MaintenanceHandler{
+				StatusFile: statusFile,
+			}
+			setMaintenanceHandler(maintenanceHandler)
+
+			// Create request body
+			body := map[string]interface{}{
+				"enabled": tt.enabled,
+			}
+			bodyBytes, err := json.Marshal(body)
+			require.NoError(t, err)
+
+			// Create request
+			req := httptest.NewRequest(http.MethodPost, "/maintenance/set", bytes.NewBuffer(bodyBytes))
+			w := httptest.NewRecorder()
+
+			// Execute request
+			err = adminHandler.toggle(w, req)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+
+			if tt.checkContent {
+				// Read and verify file content
+				content, err := os.ReadFile(statusFile)
+				require.NoError(t, err)
+
+				var status struct {
+					Enabled bool `json:"enabled"`
+				}
+				err = json.Unmarshal(content, &status)
+				require.NoError(t, err)
+
+				assert.Equal(t, tt.expectEnabled, status.Enabled)
+			}
+		})
+	}
+}
+
+func TestMaintenanceHandler_RestartPersistence(t *testing.T) {
+	// Create temporary directory
+	tmpDir := t.TempDir()
+	statusFile := filepath.Join(tmpDir, "maintenance_status.json")
+
+	// First handler instance
+	h1 := &MaintenanceHandler{
+		StatusFile: statusFile,
+	}
+	ctx := caddy.Context{}
+	err := h1.Provision(ctx)
+	require.NoError(t, err)
+
+	// Set initial state
+	h1.enabledMux.Lock()
+	h1.enabled = true
+	h1.enabledMux.Unlock()
+
+	// Persist state
+	status := struct {
+		Enabled bool `json:"enabled"`
+	}{
+		Enabled: true,
+	}
+	data, err := json.Marshal(status)
+	require.NoError(t, err)
+	err = os.WriteFile(statusFile, data, 0644)
+	require.NoError(t, err)
+
+	// Create new handler instance (simulating restart)
+	h2 := &MaintenanceHandler{
+		StatusFile:     statusFile,
+		DefaultEnabled: false, // Different from persisted state
+	}
+	err = h2.Provision(ctx)
+	require.NoError(t, err)
+
+	// Check if state was restored
+	h2.enabledMux.RLock()
+	state := h2.enabled
+	h2.enabledMux.RUnlock()
+
+	assert.True(t, state, "Maintenance state should be restored from file")
+}
+
+func TestParseCaddyfile_NewOptions(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		expectedM     *MaintenanceHandler
+		expectErr     bool
+		expectedErrIs string
+	}{
+		{
+			name: "Default enabled true",
+			input: `maintenance {
+				default_enabled true
+			}`,
+			expectedM: &MaintenanceHandler{
+				DefaultEnabled: true,
+			},
+		},
+		{
+			name: "Default enabled false",
+			input: `maintenance {
+				default_enabled false
+			}`,
+			expectedM: &MaintenanceHandler{
+				DefaultEnabled: false,
+			},
+		},
+		{
+			name: "Status file path",
+			input: `maintenance {
+				status_file /var/lib/caddy/maintenance.json
+			}`,
+			expectedM: &MaintenanceHandler{
+				StatusFile: "/var/lib/caddy/maintenance.json",
+			},
+		},
+		{
+			name: "Complete configuration with new options",
+			input: `maintenance {
+				template /path/to/template.html
+				allowed_ips 192.168.1.100 10.0.0.1
+				retry_after 600
+				default_enabled true
+				status_file /var/lib/caddy/maintenance.json
+				request_retention_mode_timeout 30
+			}`,
+			expectedM: &MaintenanceHandler{
+				HTMLTemplate:                "/path/to/template.html",
+				AllowedIPs:                  []string{"192.168.1.100", "10.0.0.1"},
+				RetryAfter:                  600,
+				DefaultEnabled:              true,
+				StatusFile:                  "/var/lib/caddy/maintenance.json",
+				RequestRetentionModeTimeout: 30,
+			},
+		},
+		{
+			name: "Invalid default_enabled value",
+			input: `maintenance {
+				default_enabled invalid
+			}`,
+			expectErr:     true,
+			expectedErrIs: "invalid default_enabled value",
+		},
+		{
+			name: "Missing default_enabled value",
+			input: `maintenance {
+				default_enabled
+			}`,
+			expectErr: true,
+		},
+		{
+			name: "Missing status_file value",
+			input: `maintenance {
+				status_file
+			}`,
+			expectErr: true,
+		},
+		{
+			name: "Status file with invalid permissions",
+			input: `maintenance {
+				status_file /root/maintenance.json
+			}`,
+			expectedM: &MaintenanceHandler{
+				StatusFile: "/root/maintenance.json",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := caddyfile.NewTestDispenser(tt.input)
+			h := httpcaddyfile.Helper{Dispenser: d}
+
+			actual, err := parseCaddyfile(h)
+
+			if tt.expectErr {
+				require.Error(t, err)
+				if tt.expectedErrIs != "" {
+					assert.Contains(t, err.Error(), tt.expectedErrIs)
+				}
+				return
+			}
+
+			require.NoError(t, err)
+			actualHandler, ok := actual.(*MaintenanceHandler)
+			require.True(t, ok)
+
+			// Compare fields
+			if tt.expectedM.HTMLTemplate != "" {
+				assert.Equal(t, tt.expectedM.HTMLTemplate, actualHandler.HTMLTemplate)
+			}
+			if tt.expectedM.StatusFile != "" {
+				assert.Equal(t, tt.expectedM.StatusFile, actualHandler.StatusFile)
+			}
+			assert.Equal(t, tt.expectedM.DefaultEnabled, actualHandler.DefaultEnabled)
+			assert.Equal(t, tt.expectedM.AllowedIPs, actualHandler.AllowedIPs)
+			assert.Equal(t, tt.expectedM.RetryAfter, actualHandler.RetryAfter)
+			assert.Equal(t, tt.expectedM.RequestRetentionModeTimeout, actualHandler.RequestRetentionModeTimeout)
+		})
+	}
+}
+
+func TestMaintenanceHandler_FilePermissions(t *testing.T) {
+	// Create temporary directory
+	tmpDir := t.TempDir()
+	statusFile := filepath.Join(tmpDir, "maintenance_status.json")
+
+	// Create admin handler
+	adminHandler := AdminHandler{}
+
+	// Setup maintenance handler
+	maintenanceHandler := &MaintenanceHandler{
+		StatusFile: statusFile,
+	}
+	setMaintenanceHandler(maintenanceHandler)
+
+	// Create request to enable maintenance
+	body := map[string]interface{}{
+		"enabled": true,
+	}
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/maintenance/set", bytes.NewBuffer(bodyBytes))
+	w := httptest.NewRecorder()
+
+	// Execute request
+	err = adminHandler.toggle(w, req)
+	require.NoError(t, err)
+
+	// Check file permissions
+	info, err := os.Stat(statusFile)
+	require.NoError(t, err)
+
+	// Check if permissions are 0644
+	expectedPerm := os.FileMode(0644)
+	assert.Equal(t, expectedPerm, info.Mode().Perm(),
+		"Status file should have 0644 permissions")
 }
