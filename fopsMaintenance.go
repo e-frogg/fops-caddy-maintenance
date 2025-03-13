@@ -3,6 +3,7 @@ package fopsMaintenance
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -89,6 +90,9 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 
 	// Check if client IP is in allowed list
 	clientIP := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(clientIP); err == nil {
+		clientIP = host
+	}
 	for _, allowedIP := range h.AllowedIPs {
 		if clientIP == allowedIP {
 			return next.ServeHTTP(w, r)
