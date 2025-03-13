@@ -32,6 +32,12 @@ type MaintenanceHandler struct {
 	// Retry-After header value in seconds
 	RetryAfter int `json:"retry_after,omitempty"`
 
+	// Default state of maintenance mode at startup
+	DefaultEnabled bool `json:"default_enabled,omitempty"`
+
+	// File path to persist maintenance status
+	StatusFile string `json:"status_file,omitempty"`
+
 	// Maintenance mode state
 	enabled    bool
 	enabledMux sync.RWMutex
@@ -67,6 +73,26 @@ func (h *MaintenanceHandler) Provision(ctx caddy.Context) error {
 		}
 		h.HTMLTemplate = string(content)
 	}
+
+	// Try to load persisted status if StatusFile is configured
+	if h.StatusFile != "" {
+		if data, err := os.ReadFile(h.StatusFile); err == nil {
+			var status struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := json.Unmarshal(data, &status); err == nil {
+				h.enabledMux.Lock()
+				h.enabled = status.Enabled
+				h.enabledMux.Unlock()
+				return nil
+			}
+		}
+	}
+
+	// If no persisted status, use DefaultEnabled
+	h.enabledMux.Lock()
+	h.enabled = h.DefaultEnabled
+	h.enabledMux.Unlock()
 
 	return nil
 }
@@ -328,6 +354,20 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 					return nil, h.Errf("retry_after value must be positive")
 				}
 				m.RetryAfter = val
+			case "default_enabled":
+				if !h.NextArg() {
+					return nil, h.ArgErr()
+				}
+				val, err := strconv.ParseBool(h.Val())
+				if err != nil {
+					return nil, h.Errf("invalid default_enabled value: %v", err)
+				}
+				m.DefaultEnabled = val
+			case "status_file":
+				if !h.NextArg() {
+					return nil, h.ArgErr()
+				}
+				m.StatusFile = h.Val()
 			case "request_retention_mode_timeout":
 				if !h.NextArg() {
 					return nil, h.ArgErr()

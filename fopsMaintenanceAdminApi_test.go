@@ -3,11 +3,15 @@ package fopsMaintenance
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAdminHandler_Routes(t *testing.T) {
@@ -163,4 +167,95 @@ func TestAdminHandler_Toggle_NoHandler(t *testing.T) {
 	if ok && apiErr.HTTPStatus != http.StatusNotFound {
 		t.Errorf("Expected status code %d, got %d", http.StatusNotFound, apiErr.HTTPStatus)
 	}
+}
+
+// TestAdminHandler_MarshalError tests the error handling when json.Marshal fails
+func TestAdminHandler_MarshalError(t *testing.T) {
+	// Create a temporary directory for the test
+	tmpDir := t.TempDir()
+	statusFile := filepath.Join(tmpDir, "maintenance_status.json")
+
+	// Setup maintenance handler
+	maintenanceHandler := &MaintenanceHandler{
+		StatusFile: statusFile,
+	}
+	setMaintenanceHandler(maintenanceHandler)
+
+	// Create admin handler
+	adminHandler := AdminHandler{}
+
+	// Create request body
+	body := map[string]interface{}{
+		"enabled": true,
+	}
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	// Create request
+	req := httptest.NewRequest(http.MethodPost, "/maintenance/set", bytes.NewBuffer(bodyBytes))
+	w := httptest.NewRecorder()
+
+	// Set a custom JSON marshal function that always fails
+	originalMarshalFunc := jsonMarshalFunc
+	defer func() {
+		// Restore the original marshal function
+		jsonMarshalFunc = originalMarshalFunc
+	}()
+
+	// Replace with a function that always returns an error
+	jsonMarshalFunc = func(v interface{}) ([]byte, error) {
+		return nil, fmt.Errorf("simulated marshal error")
+	}
+
+	// Execute request
+	err = adminHandler.toggle(w, req)
+
+	// Verify that we got an error
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to marshal status")
+
+	// Verify that the error is of the correct type
+	apiErr, ok := err.(caddy.APIError)
+	assert.True(t, ok)
+	assert.Equal(t, http.StatusInternalServerError, apiErr.HTTPStatus)
+}
+
+// TestJSONMarshalFunctions tests the JSON marshal function helpers
+func TestJSONMarshalFunctions(t *testing.T) {
+	// Save original marshal function
+	originalMarshalFunc := jsonMarshalFunc
+	defer func() {
+		// Restore the original marshal function
+		jsonMarshalFunc = originalMarshalFunc
+	}()
+
+	// Test SetJSONMarshalFunc
+	customMarshalCalled := false
+	customMarshal := func(v interface{}) ([]byte, error) {
+		customMarshalCalled = true
+		return []byte("custom"), nil
+	}
+
+	// Set custom marshal function
+	SetJSONMarshalFunc(customMarshal)
+
+	// Test that the custom function is used
+	data, err := jsonMarshalFunc(struct{}{})
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("custom"), data)
+	assert.True(t, customMarshalCalled)
+
+	// Test ResetJSONMarshal
+	ResetJSONMarshal()
+
+	// Test that the original function is restored
+	testData := map[string]string{"test": "value"}
+	data, err = jsonMarshalFunc(testData)
+	assert.NoError(t, err)
+
+	// Parse the result to verify it's valid JSON
+	var result map[string]string
+	err = json.Unmarshal(data, &result)
+	assert.NoError(t, err)
+	assert.Equal(t, "value", result["test"])
 }
