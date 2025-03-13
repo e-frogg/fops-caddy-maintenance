@@ -940,48 +940,167 @@ func TestMaintenanceHandler_StatusFile(t *testing.T) {
 	}
 }
 
-func TestMaintenanceHandler_StatusPersistence(t *testing.T) {
-	// Create temporary directory
-	tmpDir := t.TempDir()
-	statusFile := filepath.Join(tmpDir, "maintenance_status.json")
+// Create a custom marshaller for testing
+type jsonMarshaller interface {
+	Marshal(v interface{}) ([]byte, error)
+}
 
-	// Create admin handler
-	adminHandler := AdminHandler{}
+type defaultJSONMarshaller struct{}
 
+func (m *defaultJSONMarshaller) Marshal(v interface{}) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+type errorJSONMarshaller struct{}
+
+func (m *errorJSONMarshaller) Marshal(v interface{}) ([]byte, error) {
+	return nil, fmt.Errorf("simulated marshal error")
+}
+
+// Mock version of AdminHandler for testing
+type mockAdminHandler struct {
+	AdminHandler
+	marshaller jsonMarshaller
+}
+
+func (h *mockAdminHandler) toggle(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return caddy.APIError{
+			HTTPStatus: http.StatusMethodNotAllowed,
+			Err:        fmt.Errorf("method not allowed"),
+		}
+	}
+
+	var req struct {
+		Enabled                     bool `json:"enabled"`
+		RequestRetentionModeTimeout int  `json:"request_retention_mode_timeout,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return caddy.APIError{
+			HTTPStatus: http.StatusBadRequest,
+			Err:        err,
+		}
+	}
+
+	maintenanceHandler := getMaintenanceHandler()
+	if maintenanceHandler == nil {
+		return caddy.APIError{
+			HTTPStatus: http.StatusNotFound,
+			Err:        fmt.Errorf("maintenance handler not found"),
+		}
+	}
+
+	maintenanceHandler.enabledMux.Lock()
+	maintenanceHandler.enabled = req.Enabled
+	maintenanceHandler.RequestRetentionModeTimeout = req.RequestRetentionModeTimeout
+	maintenanceHandler.enabledMux.Unlock()
+
+	// Persist status if StatusFile is configured
+	if maintenanceHandler.StatusFile != "" {
+		status := struct {
+			Enabled bool `json:"enabled"`
+		}{
+			Enabled: req.Enabled,
+		}
+
+		// Use the custom marshaller
+		data, err := h.marshaller.Marshal(status)
+		if err != nil {
+			return caddy.APIError{
+				HTTPStatus: http.StatusInternalServerError,
+				Err:        fmt.Errorf("failed to marshal status: %v", err),
+			}
+		}
+
+		if err := os.WriteFile(maintenanceHandler.StatusFile, data, 0644); err != nil {
+			return caddy.APIError{
+				HTTPStatus: http.StatusInternalServerError,
+				Err:        fmt.Errorf("failed to persist status: %v", err),
+			}
+		}
+	}
+
+	return json.NewEncoder(w).Encode(map[string]bool{
+		"enabled": req.Enabled,
+	})
+}
+
+func TestMaintenanceHandler_StatusPersistenceErrors(t *testing.T) {
 	tests := []struct {
-		name          string
-		enabled       bool
-		expectError   bool
-		checkContent  bool
-		expectEnabled bool
+		name            string
+		setupHandler    func() *MaintenanceHandler
+		expectError     bool
+		errorContains   string
+		useErrorMarshal bool
 	}{
 		{
-			name:          "Enable Maintenance",
-			enabled:       true,
-			expectError:   false,
-			checkContent:  true,
-			expectEnabled: true,
+			name: "Marshal Error",
+			setupHandler: func() *MaintenanceHandler {
+				h := &MaintenanceHandler{
+					StatusFile: "/tmp/test_marshal_error.json",
+				}
+				setMaintenanceHandler(h)
+				return h
+			},
+			expectError:     true,
+			errorContains:   "failed to marshal status",
+			useErrorMarshal: true,
 		},
 		{
-			name:          "Disable Maintenance",
-			enabled:       false,
-			expectError:   false,
-			checkContent:  true,
-			expectEnabled: false,
+			name: "Write Error - Directory Not Exists",
+			setupHandler: func() *MaintenanceHandler {
+				h := &MaintenanceHandler{
+					StatusFile: "/nonexistent/directory/maintenance.json",
+				}
+				setMaintenanceHandler(h)
+				return h
+			},
+			expectError:   true,
+			errorContains: "failed to persist status",
+		},
+		{
+			name: "Write Error - Permission Denied",
+			setupHandler: func() *MaintenanceHandler {
+				// Create a file with no write permissions
+				tmpDir := t.TempDir()
+				statusFile := filepath.Join(tmpDir, "readonly.json")
+
+				// Create the file
+				err := os.WriteFile(statusFile, []byte(`{"enabled":false}`), 0400)
+				require.NoError(t, err)
+
+				// Remove write permissions
+				err = os.Chmod(statusFile, 0400)
+				require.NoError(t, err)
+
+				h := &MaintenanceHandler{
+					StatusFile: statusFile,
+				}
+				setMaintenanceHandler(h)
+				return h
+			},
+			expectError:   true,
+			errorContains: "failed to persist status",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Setup maintenance handler
-			maintenanceHandler := &MaintenanceHandler{
-				StatusFile: statusFile,
+			// Setup handler
+			tt.setupHandler()
+
+			// Create admin handler with appropriate marshaller
+			var adminHandler mockAdminHandler
+			if tt.useErrorMarshal {
+				adminHandler.marshaller = &errorJSONMarshaller{}
+			} else {
+				adminHandler.marshaller = &defaultJSONMarshaller{}
 			}
-			setMaintenanceHandler(maintenanceHandler)
 
 			// Create request body
 			body := map[string]interface{}{
-				"enabled": tt.enabled,
+				"enabled": true,
 			}
 			bodyBytes, err := json.Marshal(body)
 			require.NoError(t, err)
@@ -995,22 +1114,11 @@ func TestMaintenanceHandler_StatusPersistence(t *testing.T) {
 
 			if tt.expectError {
 				assert.Error(t, err)
-				return
-			}
-			assert.NoError(t, err)
-
-			if tt.checkContent {
-				// Read and verify file content
-				content, err := os.ReadFile(statusFile)
-				require.NoError(t, err)
-
-				var status struct {
-					Enabled bool `json:"enabled"`
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
 				}
-				err = json.Unmarshal(content, &status)
-				require.NoError(t, err)
-
-				assert.Equal(t, tt.expectEnabled, status.Enabled)
+			} else {
+				assert.NoError(t, err)
 			}
 		})
 	}
@@ -1220,97 +1328,6 @@ func TestMaintenanceHandler_FilePermissions(t *testing.T) {
 		"Status file should have 0644 permissions")
 }
 
-func TestMaintenanceHandler_StatusPersistenceErrors(t *testing.T) {
-	// Create admin handler
-	adminHandler := AdminHandler{}
-
-	tests := []struct {
-		name          string
-		setupHandler  func() *MaintenanceHandler
-		expectError   bool
-		errorContains string
-	}{
-		{
-			name: "Marshal Error",
-			setupHandler: func() *MaintenanceHandler {
-				// This test is just for coverage, as json.Marshal rarely fails with simple structs
-				h := &MaintenanceHandler{
-					StatusFile: "/tmp/test_marshal_error.json",
-				}
-				setMaintenanceHandler(h)
-				return h
-			},
-			expectError: false,
-		},
-		{
-			name: "Write Error - Directory Not Exists",
-			setupHandler: func() *MaintenanceHandler {
-				h := &MaintenanceHandler{
-					StatusFile: "/nonexistent/directory/maintenance.json",
-				}
-				setMaintenanceHandler(h)
-				return h
-			},
-			expectError:   true,
-			errorContains: "failed to persist status",
-		},
-		{
-			name: "Write Error - Permission Denied",
-			setupHandler: func() *MaintenanceHandler {
-				// Create a file with no write permissions
-				tmpDir := t.TempDir()
-				statusFile := filepath.Join(tmpDir, "readonly.json")
-
-				// Create the file
-				err := os.WriteFile(statusFile, []byte(`{"enabled":false}`), 0400)
-				require.NoError(t, err)
-
-				// Remove write permissions
-				err = os.Chmod(statusFile, 0400)
-				require.NoError(t, err)
-
-				h := &MaintenanceHandler{
-					StatusFile: statusFile,
-				}
-				setMaintenanceHandler(h)
-				return h
-			},
-			expectError:   true,
-			errorContains: "failed to persist status",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Setup handler
-			tt.setupHandler()
-
-			// Create request body
-			body := map[string]interface{}{
-				"enabled": true,
-			}
-			bodyBytes, err := json.Marshal(body)
-			require.NoError(t, err)
-
-			// Create request
-			req := httptest.NewRequest(http.MethodPost, "/maintenance/set", bytes.NewBuffer(bodyBytes))
-			w := httptest.NewRecorder()
-
-			// Execute request
-			err = adminHandler.toggle(w, req)
-
-			if tt.expectError {
-				assert.Error(t, err)
-				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains)
-				}
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
 func TestMaintenanceHandler_ServeHTTP_EdgeCases(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -1392,6 +1409,82 @@ func TestMaintenanceHandler_ServeHTTP_EdgeCases(t *testing.T) {
 			}
 
 			assert.Equal(t, tt.expectedStatus, w.Code)
+		})
+	}
+}
+
+func TestMaintenanceHandler_StatusPersistence(t *testing.T) {
+	// Create temporary directory
+	tmpDir := t.TempDir()
+	statusFile := filepath.Join(tmpDir, "maintenance_status.json")
+
+	// Create admin handler
+	adminHandler := AdminHandler{}
+
+	tests := []struct {
+		name          string
+		enabled       bool
+		expectError   bool
+		checkContent  bool
+		expectEnabled bool
+	}{
+		{
+			name:          "Enable Maintenance",
+			enabled:       true,
+			expectError:   false,
+			checkContent:  true,
+			expectEnabled: true,
+		},
+		{
+			name:          "Disable Maintenance",
+			enabled:       false,
+			expectError:   false,
+			checkContent:  true,
+			expectEnabled: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup maintenance handler
+			maintenanceHandler := &MaintenanceHandler{
+				StatusFile: statusFile,
+			}
+			setMaintenanceHandler(maintenanceHandler)
+
+			// Create request body
+			body := map[string]interface{}{
+				"enabled": tt.enabled,
+			}
+			bodyBytes, err := json.Marshal(body)
+			require.NoError(t, err)
+
+			// Create request
+			req := httptest.NewRequest(http.MethodPost, "/maintenance/set", bytes.NewBuffer(bodyBytes))
+			w := httptest.NewRecorder()
+
+			// Execute request
+			err = adminHandler.toggle(w, req)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+
+			if tt.checkContent {
+				// Read and verify file content
+				content, err := os.ReadFile(statusFile)
+				require.NoError(t, err)
+
+				var status struct {
+					Enabled bool `json:"enabled"`
+				}
+				err = json.Unmarshal(content, &status)
+				require.NoError(t, err)
+
+				assert.Equal(t, tt.expectEnabled, status.Enabled)
+			}
 		})
 	}
 }

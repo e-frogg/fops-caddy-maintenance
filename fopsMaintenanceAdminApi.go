@@ -13,7 +13,21 @@ import (
 var (
 	maintenanceHandlerInstance *MaintenanceHandler
 	instanceMux                sync.RWMutex
+	// For testing purposes only
+	jsonMarshalFunc = json.Marshal
 )
+
+// ResetJSONMarshal resets the JSON marshal function to the default
+// This is for testing purposes only
+func ResetJSONMarshal() {
+	jsonMarshalFunc = json.Marshal
+}
+
+// SetJSONMarshalFunc sets a custom JSON marshal function
+// This is for testing purposes only
+func SetJSONMarshalFunc(fn func(interface{}) ([]byte, error)) {
+	jsonMarshalFunc = fn
+}
 
 func init() {
 	caddy.RegisterModule(AdminHandler{})
@@ -102,7 +116,7 @@ func (h AdminHandler) toggle(w http.ResponseWriter, r *http.Request) error {
 		}{
 			Enabled: req.Enabled,
 		}
-		data, err := json.Marshal(status)
+		data, err := jsonMarshalFunc(status)
 		if err != nil {
 			return caddy.APIError{
 				HTTPStatus: http.StatusInternalServerError,
