@@ -377,6 +377,24 @@ func TestMaintenanceHandler_ServeHTTP_AllowedIPs(t *testing.T) {
 			clientIP:      "192.168.1.100",
 			expectBlocked: true,
 		},
+		{
+			name:          "Allowed IP with port should bypass maintenance",
+			allowedIPs:    []string{"192.168.1.100"},
+			clientIP:      "192.168.1.100:12345",
+			expectBlocked: false,
+		},
+		{
+			name:          "Non-allowed IP with port should see maintenance page",
+			allowedIPs:    []string{"192.168.1.100"},
+			clientIP:      "192.168.1.101:12345",
+			expectBlocked: true,
+		},
+		{
+			name:          "Real world IP should bypass maintenance",
+			allowedIPs:    []string{"90.24.160.89"},
+			clientIP:      "90.24.160.89:54321",
+			expectBlocked: false,
+		},
 	}
 
 	for _, tt := range tests {
