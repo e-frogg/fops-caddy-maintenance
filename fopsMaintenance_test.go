@@ -285,7 +285,11 @@ func TestMaintenanceHandlerTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create test directory: %v", err)
 	}
-	defer os.RemoveAll(testDir)
+	defer func() {
+		if err := os.RemoveAll(testDir); err != nil {
+			t.Errorf("Failed to clean up test directory: %v", err)
+		}
+	}()
 
 	// Write test file
 	err = os.WriteFile(filepath.Join(testDir, "valid.html"), []byte(validHTML), 0644)
