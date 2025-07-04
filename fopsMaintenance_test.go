@@ -364,6 +364,7 @@ func TestMaintenanceHandler_ServeHTTP_AllowedIPs(t *testing.T) {
 		allowedIPs    []string
 		clientIP      string
 		expectBlocked bool
+		expectError   bool
 	}{
 		{
 			name:          "Allowed IP should bypass maintenance",
@@ -396,10 +397,94 @@ func TestMaintenanceHandler_ServeHTTP_AllowedIPs(t *testing.T) {
 			expectBlocked: true,
 		},
 		{
-			name:          "Real world IP should bypass maintenance",
-			allowedIPs:    []string{"90.24.160.89"},
-			clientIP:      "90.24.160.89:54321",
+			name:          "Local IP should bypass maintenance",
+			allowedIPs:    []string{"192.168.1.50"},
+			clientIP:      "192.168.1.50:54321",
 			expectBlocked: false,
+		},
+		{
+			name:          "CIDR notation - IP in range should bypass maintenance",
+			allowedIPs:    []string{"192.168.5.0/22"},
+			clientIP:      "192.168.5.5",
+			expectBlocked: false,
+		},
+		{
+			name:          "CIDR notation - IP outside range should see maintenance page",
+			allowedIPs:    []string{"192.168.5.0/22"},
+			clientIP:      "192.168.8.5",
+			expectBlocked: true,
+		},
+		{
+			name:          "CIDR notation - IP in range with port should bypass maintenance",
+			allowedIPs:    []string{"192.168.5.0/22"},
+			clientIP:      "192.168.5.5:12345",
+			expectBlocked: false,
+		},
+		{
+			name:          "Multiple CIDR ranges - IP in first range",
+			allowedIPs:    []string{"192.168.5.0/22", "10.0.1.0/24"},
+			clientIP:      "192.168.5.10",
+			expectBlocked: false,
+		},
+		{
+			name:          "Multiple CIDR ranges - IP in second range",
+			allowedIPs:    []string{"192.168.5.0/22", "10.0.1.0/24"},
+			clientIP:      "10.0.1.50",
+			expectBlocked: false,
+		},
+		{
+			name:          "Multiple CIDR ranges - IP outside all ranges",
+			allowedIPs:    []string{"192.168.5.0/22", "10.0.1.0/24"},
+			clientIP:      "192.168.1.100",
+			expectBlocked: true,
+		},
+		{
+			name:          "Mixed individual IPs and CIDR ranges",
+			allowedIPs:    []string{"192.168.1.100", "192.168.5.0/22", "10.0.1.0/24"},
+			clientIP:      "192.168.1.100",
+			expectBlocked: false,
+		},
+		{
+			name:          "Mixed individual IPs and CIDR ranges - IP in CIDR range",
+			allowedIPs:    []string{"192.168.1.100", "192.168.5.0/22", "10.0.1.0/24"},
+			clientIP:      "192.168.5.15",
+			expectBlocked: false,
+		},
+		{
+			name:          "IPv6 individual IP should bypass maintenance",
+			allowedIPs:    []string{"2001:db8::1"},
+			clientIP:      "2001:db8::1",
+			expectBlocked: false,
+		},
+		{
+			name:          "IPv6 CIDR notation - IP in range should bypass maintenance",
+			allowedIPs:    []string{"2001:db8::/32"},
+			clientIP:      "2001:db8::1234",
+			expectBlocked: false,
+		},
+		{
+			name:          "IPv6 CIDR notation - IP outside range should see maintenance page",
+			allowedIPs:    []string{"2001:db8::/32"},
+			clientIP:      "2001:db9::1234",
+			expectBlocked: true,
+		},
+		{
+			name:          "Mixed IPv4 and IPv6",
+			allowedIPs:    []string{"192.168.1.100", "2001:db8::/32"},
+			clientIP:      "2001:db8::5678",
+			expectBlocked: false,
+		},
+		{
+			name:        "Invalid CIDR notation should cause configuration error",
+			allowedIPs:  []string{"192.168.5.0/22", "invalid-cidr"},
+			clientIP:    "192.168.5.5",
+			expectError: true,
+		},
+		{
+			name:        "Invalid IP address should cause configuration error",
+			allowedIPs:  []string{"192.168.1.100", "invalid-ip"},
+			clientIP:    "192.168.1.100",
+			expectError: true,
 		},
 	}
 
@@ -409,6 +494,18 @@ func TestMaintenanceHandler_ServeHTTP_AllowedIPs(t *testing.T) {
 			h := &MaintenanceHandler{
 				AllowedIPs: tt.allowedIPs,
 			}
+
+			// Test Provision (this will parse the IPs)
+			ctx := caddy.Context{}
+			err := h.Provision(ctx)
+
+			if tt.expectError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+
+			// Set maintenance mode
 			h.enabledMux.Lock()
 			h.enabled = true
 			h.enabledMux.Unlock()
@@ -427,7 +524,7 @@ func TestMaintenanceHandler_ServeHTTP_AllowedIPs(t *testing.T) {
 			})
 
 			// Serve the request
-			err := h.ServeHTTP(w, req, next)
+			err = h.ServeHTTP(w, req, next)
 			require.NoError(t, err)
 
 			if tt.expectBlocked {
@@ -438,6 +535,168 @@ func TestMaintenanceHandler_ServeHTTP_AllowedIPs(t *testing.T) {
 				assert.Equal(t, http.StatusOK, w.Code)
 				assert.Equal(t, "passed", w.Header().Get("X-Test"))
 			}
+		})
+	}
+}
+
+// TestParseAllowedIPs tests the IP parsing functionality directly
+func TestParseAllowedIPs(t *testing.T) {
+	tests := []struct {
+		name        string
+		allowedIPs  []string
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name:       "Valid individual IPv4 IPs",
+			allowedIPs: []string{"192.168.1.100", "10.0.0.1"},
+		},
+		{
+			name:       "Valid CIDR IPv4 networks",
+			allowedIPs: []string{"192.168.5.0/22", "10.0.1.0/24"},
+		},
+		{
+			name:       "Valid individual IPv6 IPs",
+			allowedIPs: []string{"2001:db8::1", "::1"},
+		},
+		{
+			name:       "Valid CIDR IPv6 networks",
+			allowedIPs: []string{"2001:db8::/32", "::/128"},
+		},
+		{
+			name:       "Mixed IPv4 and IPv6",
+			allowedIPs: []string{"192.168.1.100", "2001:db8::/32", "10.0.1.0/24"},
+		},
+		{
+			name:        "Invalid CIDR notation",
+			allowedIPs:  []string{"192.168.5.0/22", "invalid-cidr"},
+			expectError: true,
+			errorMsg:    "invalid IP address",
+		},
+		{
+			name:        "Invalid IP address",
+			allowedIPs:  []string{"192.168.1.100", "invalid-ip"},
+			expectError: true,
+			errorMsg:    "invalid IP address",
+		},
+		{
+			name:        "Invalid CIDR format",
+			allowedIPs:  []string{"192.168.1.100/33"}, // Invalid for IPv4
+			expectError: true,
+			errorMsg:    "invalid CIDR notation",
+		},
+		{
+			name:       "IPs with leading/trailing spaces",
+			allowedIPs: []string{" 192.168.1.100 ", " 10.0.0.1", "2001:db8::1 "},
+		},
+		{
+			name:       "CIDR with leading/trailing spaces",
+			allowedIPs: []string{" 192.168.5.0/22 ", " 10.0.1.0/24", "2001:db8::/32 "},
+		},
+		{
+			name:       "Multiple calls should reset slices",
+			allowedIPs: []string{"192.168.1.100", "192.168.5.0/22"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &MaintenanceHandler{
+				AllowedIPs: tt.allowedIPs,
+			}
+
+			err := h.parseAllowedIPs()
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorMsg != "" {
+					assert.Contains(t, err.Error(), tt.errorMsg)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestParseAllowedIPsMultipleCalls tests that slices are properly reset on multiple calls
+func TestParseAllowedIPsMultipleCalls(t *testing.T) {
+	h := &MaintenanceHandler{
+		AllowedIPs: []string{"192.168.1.100", "192.168.5.0/22"},
+	}
+
+	// First call
+	err := h.parseAllowedIPs()
+	require.NoError(t, err)
+
+	// Verify first call populated slices correctly
+	assert.Equal(t, 1, len(h.allowedIndividualIPs), "Should have 1 individual IP")
+	assert.Equal(t, 1, len(h.allowedNetworks), "Should have 1 network")
+
+	// Second call with different IPs
+	h.AllowedIPs = []string{"10.0.0.1", "10.0.1.0/24"}
+	err = h.parseAllowedIPs()
+	require.NoError(t, err)
+
+	// Verify that slices were reset and contain new values
+	assert.Equal(t, 1, len(h.allowedIndividualIPs), "Should have 1 individual IP after reset")
+	assert.Equal(t, 1, len(h.allowedNetworks), "Should have 1 network after reset")
+
+	// Verify the content is from the second call, not accumulated
+	assert.Equal(t, "10.0.0.1", h.allowedIndividualIPs[0].String(), "Should contain IP from second call")
+}
+
+// TestIsIPAllowedDirect tests the IP checking functionality directly
+func TestIsIPAllowedDirect(t *testing.T) {
+	h := &MaintenanceHandler{
+		AllowedIPs: []string{"192.168.1.100", "192.168.5.0/22", "2001:db8::/32"},
+	}
+
+	err := h.parseAllowedIPs()
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		clientIP string
+		expected bool
+	}{
+		{
+			name:     "Exact IPv4 match",
+			clientIP: "192.168.1.100",
+			expected: true,
+		},
+		{
+			name:     "IPv4 in CIDR range",
+			clientIP: "192.168.5.5",
+			expected: true,
+		},
+		{
+			name:     "IPv6 in CIDR range",
+			clientIP: "2001:db8::1234",
+			expected: true,
+		},
+		{
+			name:     "IPv4 outside range",
+			clientIP: "192.168.8.5",
+			expected: false,
+		},
+		{
+			name:     "IPv6 outside range",
+			clientIP: "2001:db9::1234",
+			expected: false,
+		},
+		{
+			name:     "Invalid IP",
+			clientIP: "invalid-ip",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := h.isIPAllowed(tt.clientIP)
+			assert.Equal(t, tt.expected, result,
+				"Expected %v for clientIP %s", tt.expected, tt.clientIP)
 		})
 	}
 }
