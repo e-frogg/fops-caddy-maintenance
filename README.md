@@ -38,9 +38,10 @@
 ## ✨ Features
 
 - Maintenance mode toggle via caddy adminAPI
-- IP-based access control
+- IP-based access control with CIDR notation support
 - Custom HTML template support
 - Configurable retry period
+- Request retention mode for seamless maintenance
 
 ## 💡 Benefits
 - Centralized control through Caddy
@@ -49,6 +50,7 @@
 - SEO friendly interruption
 - Perfect for containerized architectures
 - Reduced manual intervention needs
+- Flexible IP access control with CIDR ranges
 
 ## 🔧 Build caddy with plugin
 
@@ -65,8 +67,8 @@ Add the maintenance directive to your Caddyfile:
     maintenance {
       # Path to custom HTML template
       template "/path/to/template.html"
-      # List of IPs that can access during maintenance
-      allowed_ips 192.168.1.100 10.0.0.1
+      # List of IPs that can access during maintenance (supports CIDR notation)
+      allowed_ips 192.168.1.100 10.0.0.1 192.168.5.0/22
       # Retry-After header value in seconds (default: 300)
       retry_after 3600
     }
@@ -78,11 +80,38 @@ Add the maintenance directive to your Caddyfile:
 | Option | Description | Required |
 |--------|-------------|----------|
 | `template` | Path to custom HTML template | No |
-| `allowed_ips` | List of IPs that can access during maintenance | No |
+| `allowed_ips` | List of IPs that can access during maintenance (supports CIDR notation) | No |
+| `allowed_ips_file` | Path to file containing allowed IPs with comments | No |
 | `retry_after` | Retry-After header value in seconds | No |
 | `default_enabled` | Enable maintenance mode by default at startup | No |
 | `status_file` | Path to file for persisting maintenance status | No |
 | `request_retention_mode_timeout` | Time in seconds to retain requests during maintenance | No |
+
+### IP Access Control with CIDR Support
+
+The `allowed_ips` directive supports both individual IP addresses and CIDR notation for network ranges, with full IPv4 and IPv6 support:
+
+```caddy
+maintenance {
+  # Individual IP addresses (IPv4 and IPv6)
+  allowed_ips 192.168.1.100 10.0.0.50 2001:db8::1 ::1
+  
+  # CIDR network ranges (IPv4 and IPv6)
+  allowed_ips 192.168.5.0/22 10.0.1.0/24 172.16.0.0/16 2001:db8::/32
+  
+  # Mixed individual IPs and CIDR ranges
+  allowed_ips 192.168.1.100 192.168.5.0/22 10.0.1.0/24 2001:db8::/32
+}
+```
+
+**CIDR Examples:**
+- `192.168.5.0/22` - Allows IPv4 addresses from 192.168.5.0 to 192.168.7.255
+- `10.0.1.0/24` - Allows IPv4 addresses from 10.0.1.0 to 10.0.1.255
+- `172.16.0.0/16` - Allows IPv4 addresses from 172.16.0.0 to 172.16.255.255
+- `2001:db8::/32` - Allows IPv6 addresses in the 2001:db8::/32 range
+- `::/128` - Allows only the IPv6 loopback address (::1)
+
+**Important:** The plugin uses the client's direct IP address (`r.RemoteAddr`) and does not evaluate proxy headers like `X-Forwarded-For` or `X-Real-IP`. If your server is behind a proxy, you must whitelist the proxy's IP address rather than the original client IPs.
 
 ## 🚀 API Reference
 
@@ -136,7 +165,7 @@ preprod.example.com {
 }
 ```
 
-### Persistent Maintenance Status
+### Persistent Maintenance Status with Network Access Control
 
 ```caddy
 example.com {
@@ -145,10 +174,70 @@ example.com {
     status_file /var/lib/caddy/maintenance.json
     # Retry-After header value in seconds
     retry_after 300
+    # Allow office network and specific IPs
+    allowed_ips 192.168.1.100 192.168.5.0/22 10.0.1.0/24 172.16.0.0/16
   }
 }
 ```
 
+### Corporate Network Access During Maintenance
+
+**Scenario**:
+- Corporate website with internal and external users
+- Need to perform maintenance while allowing internal staff access
+- Multiple office locations with different network ranges
+
+**Solution**:
+The maintenance plugin with CIDR support allows:
+1. Configure network ranges for all office locations (e.g., `10.0.0.0/8`, `172.16.0.0/12`)
+2. Allow specific external IPs for remote workers
+3. Enable maintenance mode while internal users continue working
+4. External users see maintenance page
+5. Seamless maintenance without business interruption
+
+### Gestion centralisée des accès avec fichiers d'IPs
+
+**Scenario**:
+- Organisation avec plusieurs équipes et sites
+- Besoin de maintenir une liste d'IPs autorisées complexe
+- Équipes distribuées avec différents niveaux d'accès
+- Audit et traçabilité des modifications
+
+**Solution**:
+La fonctionnalité `allowed_ips_file` permet une gestion centralisée :
+
+1. **Organisation par équipe** :
+   ```txt
+   # /etc/caddy/maintenance_ips.txt
+   # Équipe Infrastructure
+   192.168.1.100  # Admin principal
+   192.168.1.101  # Admin secondaire
+   
+   # Équipe Développement
+   192.168.5.0/22 # Réseau dev
+   10.0.1.0/24    # Réseau QA
+   
+   # Accès externe
+   203.0.113.10   # Admin externe
+   ```
+
+2. **Configuration Caddyfile simplifiée** :
+   ```caddy
+   corporate.example.com {
+     maintenance {
+       allowed_ips_file /etc/caddy/maintenance_ips.txt
+       # IPs d'urgence en ligne
+       allowed_ips 192.168.1.1  # Serveur de secours
+     }
+   }
+   ```
+
+3. **Avantages** :
+   - Maintenance séparée des IPs et de la configuration
+   - Documentation claire de chaque IP
+   - Possibilité de versioning du fichier d'IPs
+   - Collaboration facilitée entre équipes
+   - Audit trail des modifications
 
 ## Real World Use Cases
 
@@ -162,7 +251,7 @@ example.com {
 **Solution**:
 The maintenance plugin enables seamless maintenance mode activation by:
 1. Toggling maintenance mode through a simple API call to Caddy's admin interface
-2. Instantly cutting off all incoming traffic
+2. Instantly cutting off all incoming traffic (except allowed IPs/networks)
 3. Displaying a maintenance page to all users
 4. Safely performing required maintenance tasks, deployment, container rebuilds, etc.
 5. Restoring service when ready
@@ -178,7 +267,6 @@ The maintenance plugin enables seamless maintenance mode activation by:
 1. Toggling maintenance on through API call to Caddy's admin interface with request retention timeout configuration 
 2. Caddy instantly retain incoming requests for the predefined period until maintenance mode is disabled or display a maintenance page if timeout is reached
 3. Toggling maintenance off through API, the retained requests are released and forwarded to the backend
-
 
 ### Automated Maintenance Based on Critical Services Health
 
@@ -196,7 +284,6 @@ The maintenance plugin can be integrated with Docker health checks:
 2. Custom script watches for health status changes
 3. Maintenance mode automatically triggered when critical service fails
 4. System remains protected until services are healthy again
-
 
 ## 👩‍💻 Development
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,9 @@ type MaintenanceHandler struct {
 	// List of IPs allowed to bypass maintenance mode
 	AllowedIPs []string `json:"allowed_ips,omitempty"`
 
+	// File path containing allowed IPs with comments
+	AllowedIPsFile string `json:"allowed_ips_file,omitempty"`
+
 	// Retry-After header value in seconds
 	RetryAfter int `json:"retry_after,omitempty"`
 
@@ -44,6 +48,10 @@ type MaintenanceHandler struct {
 
 	// Request retention mode timeout in seconds
 	RequestRetentionModeTimeout int `json:"request_retention_mode_timeout,omitempty"`
+
+	// Pre-parsed IP access control for performance
+	allowedIndividualIPs []net.IP
+	allowedNetworks      []*net.IPNet
 
 	logger *zap.Logger
 	ctx    caddy.Context
@@ -64,6 +72,11 @@ func (h *MaintenanceHandler) Provision(ctx caddy.Context) error {
 
 	// Register the maintenance handler
 	setMaintenanceHandler(h)
+
+	// Pre-parse IP access control for performance
+	if err := h.parseAllowedIPs(); err != nil {
+		return fmt.Errorf("failed to parse allowed IPs: %v", err)
+	}
 
 	// Load template file if path is provided
 	if h.HTMLTemplate != "" {
@@ -97,6 +110,94 @@ func (h *MaintenanceHandler) Provision(ctx caddy.Context) error {
 	return nil
 }
 
+// parseAllowedIPs pre-parses individual IPs and CIDR networks for performance
+func (h *MaintenanceHandler) parseAllowedIPs() error {
+	// Reset slices to prevent duplication on multiple calls
+	h.allowedIndividualIPs = nil
+	h.allowedNetworks = nil
+
+	// Load IPs from file if specified
+	if h.AllowedIPsFile != "" {
+		fileIPs, err := h.loadIPsFromFile(h.AllowedIPsFile)
+		if err != nil {
+			return fmt.Errorf("failed to load IPs from file '%s': %v", h.AllowedIPsFile, err)
+		}
+		h.AllowedIPs = append(h.AllowedIPs, fileIPs...)
+	}
+
+	for _, allowedIP := range h.AllowedIPs {
+		// Trim spaces to tolerate stray spaces in Caddyfiles
+		allowedIP = strings.TrimSpace(allowedIP)
+
+		// Check if it's a CIDR notation
+		if strings.Contains(allowedIP, "/") {
+			// Parse CIDR network
+			_, ipNet, err := net.ParseCIDR(allowedIP)
+			if err != nil {
+				return fmt.Errorf("invalid CIDR notation '%s': %v", allowedIP, err)
+			}
+			h.allowedNetworks = append(h.allowedNetworks, ipNet)
+		} else {
+			// Parse individual IP
+			ip := net.ParseIP(allowedIP)
+			if ip == nil {
+				return fmt.Errorf("invalid IP address '%s'", allowedIP)
+			}
+			h.allowedIndividualIPs = append(h.allowedIndividualIPs, ip)
+		}
+	}
+	return nil
+}
+
+// loadIPsFromFile reads IPs from a file with comment support
+func (h *MaintenanceHandler) loadIPsFromFile(filePath string) ([]string, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %v", err)
+	}
+
+	var ips []string
+	lines := strings.Split(string(content), "\n")
+
+	for lineNum, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Extract IP from line (remove inline comments)
+		if commentIndex := strings.Index(line, "#"); commentIndex != -1 {
+			line = strings.TrimSpace(line[:commentIndex])
+		}
+
+		// Skip empty lines after comment removal
+		if line == "" {
+			continue
+		}
+
+		// Validate IP format
+		if strings.Contains(line, "/") {
+			// CIDR notation
+			_, _, err := net.ParseCIDR(line)
+			if err != nil {
+				return nil, fmt.Errorf("invalid CIDR notation '%s' at line %d: %v", line, lineNum+1, err)
+			}
+		} else {
+			// Individual IP
+			ip := net.ParseIP(line)
+			if ip == nil {
+				return nil, fmt.Errorf("invalid IP address '%s' at line %d", line, lineNum+1)
+			}
+		}
+
+		ips = append(ips, line)
+	}
+
+	return ips, nil
+}
+
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*MaintenanceHandler)(nil)
@@ -119,10 +220,8 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 	if host, _, err := net.SplitHostPort(clientIP); err == nil {
 		clientIP = host
 	}
-	for _, allowedIP := range h.AllowedIPs {
-		if clientIP == allowedIP {
-			return next.ServeHTTP(w, r)
-		}
+	if h.isIPAllowed(clientIP) {
+		return next.ServeHTTP(w, r)
 	}
 
 	// Request retention mode disabled, serve maintenance page now
@@ -149,11 +248,36 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 			enabled := h.enabled
 			h.enabledMux.RUnlock()
 			if !enabled {
-				// Mode maintenance désactivé, transférer la requête
+				// Maintenance mode disabled, forward the request
 				return next.ServeHTTP(w, r)
 			}
 		}
 	}
+}
+
+// isIPAllowed checks if an IP address is allowed using pre-parsed IPs and networks
+func (h *MaintenanceHandler) isIPAllowed(clientIP string) bool {
+	// Parse client IP
+	ip := net.ParseIP(clientIP)
+	if ip == nil {
+		return false
+	}
+
+	// Check individual IPs first (faster for exact matches)
+	for _, allowedIP := range h.allowedIndividualIPs {
+		if ip.Equal(allowedIP) {
+			return true
+		}
+	}
+
+	// Check CIDR networks
+	for _, network := range h.allowedNetworks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func serveMaintenancePage(r *http.Request, w http.ResponseWriter, h *MaintenanceHandler) error {
@@ -380,6 +504,11 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 					return nil, h.Errf("request_retention_mode_timeout value must be positive")
 				}
 				m.RequestRetentionModeTimeout = val
+			case "allowed_ips_file":
+				if !h.NextArg() {
+					return nil, h.ArgErr()
+				}
+				m.AllowedIPsFile = h.Val()
 			default:
 				return nil, h.Errf("unknown subdirective '%s'", h.Val())
 			}
