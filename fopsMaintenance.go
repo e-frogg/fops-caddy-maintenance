@@ -30,6 +30,9 @@ type MaintenanceHandler struct {
 	// List of IPs allowed to bypass maintenance mode
 	AllowedIPs []string `json:"allowed_ips,omitempty"`
 
+	// File path containing allowed IPs with comments
+	AllowedIPsFile string `json:"allowed_ips_file,omitempty"`
+
 	// Retry-After header value in seconds
 	RetryAfter int `json:"retry_after,omitempty"`
 
@@ -113,6 +116,15 @@ func (h *MaintenanceHandler) parseAllowedIPs() error {
 	h.allowedIndividualIPs = nil
 	h.allowedNetworks = nil
 
+	// Load IPs from file if specified
+	if h.AllowedIPsFile != "" {
+		fileIPs, err := h.loadIPsFromFile(h.AllowedIPsFile)
+		if err != nil {
+			return fmt.Errorf("failed to load IPs from file '%s': %v", h.AllowedIPsFile, err)
+		}
+		h.AllowedIPs = append(h.AllowedIPs, fileIPs...)
+	}
+
 	for _, allowedIP := range h.AllowedIPs {
 		// Trim spaces to tolerate stray spaces in Caddyfiles
 		allowedIP = strings.TrimSpace(allowedIP)
@@ -135,6 +147,55 @@ func (h *MaintenanceHandler) parseAllowedIPs() error {
 		}
 	}
 	return nil
+}
+
+// loadIPsFromFile reads IPs from a file with comment support
+func (h *MaintenanceHandler) loadIPsFromFile(filePath string) ([]string, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %v", err)
+	}
+
+	var ips []string
+	lines := strings.Split(string(content), "\n")
+
+	for lineNum, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Extract IP from line (remove inline comments)
+		if commentIndex := strings.Index(line, "#"); commentIndex != -1 {
+			line = strings.TrimSpace(line[:commentIndex])
+		}
+
+		// Skip empty lines after comment removal
+		if line == "" {
+			continue
+		}
+
+		// Validate IP format
+		if strings.Contains(line, "/") {
+			// CIDR notation
+			_, _, err := net.ParseCIDR(line)
+			if err != nil {
+				return nil, fmt.Errorf("invalid CIDR notation '%s' at line %d: %v", line, lineNum+1, err)
+			}
+		} else {
+			// Individual IP
+			ip := net.ParseIP(line)
+			if ip == nil {
+				return nil, fmt.Errorf("invalid IP address '%s' at line %d", line, lineNum+1)
+			}
+		}
+
+		ips = append(ips, line)
+	}
+
+	return ips, nil
 }
 
 // Interface guards
@@ -443,6 +504,11 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 					return nil, h.Errf("request_retention_mode_timeout value must be positive")
 				}
 				m.RequestRetentionModeTimeout = val
+			case "allowed_ips_file":
+				if !h.NextArg() {
+					return nil, h.ArgErr()
+				}
+				m.AllowedIPsFile = h.Val()
 			default:
 				return nil, h.Errf("unknown subdirective '%s'", h.Val())
 			}

@@ -81,6 +81,7 @@ Add the maintenance directive to your Caddyfile:
 |--------|-------------|----------|
 | `template` | Path to custom HTML template | No |
 | `allowed_ips` | List of IPs that can access during maintenance (supports CIDR notation) | No |
+| `allowed_ips_file` | Path to file containing allowed IPs with comments | No |
 | `retry_after` | Retry-After header value in seconds | No |
 | `default_enabled` | Enable maintenance mode by default at startup | No |
 | `status_file` | Path to file for persisting maintenance status | No |
@@ -181,18 +182,62 @@ example.com {
 
 ### Corporate Network Access During Maintenance
 
-```caddy
-corporate.example.com {
-  maintenance {
-    # Allow entire corporate network ranges
-    allowed_ips 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
-    # Allow specific external IPs
-    allowed_ips 192.168.1.50 10.0.0.100
-    # Custom maintenance template
-    template "/etc/caddy/maintenance-corporate.html"
-  }
-}
-```
+**Scenario**:
+- Corporate website with internal and external users
+- Need to perform maintenance while allowing internal staff access
+- Multiple office locations with different network ranges
+
+**Solution**:
+The maintenance plugin with CIDR support allows:
+1. Configure network ranges for all office locations (e.g., `10.0.0.0/8`, `172.16.0.0/12`)
+2. Allow specific external IPs for remote workers
+3. Enable maintenance mode while internal users continue working
+4. External users see maintenance page
+5. Seamless maintenance without business interruption
+
+### Gestion centralisée des accès avec fichiers d'IPs
+
+**Scenario**:
+- Organisation avec plusieurs équipes et sites
+- Besoin de maintenir une liste d'IPs autorisées complexe
+- Équipes distribuées avec différents niveaux d'accès
+- Audit et traçabilité des modifications
+
+**Solution**:
+La fonctionnalité `allowed_ips_file` permet une gestion centralisée :
+
+1. **Organisation par équipe** :
+   ```txt
+   # /etc/caddy/maintenance_ips.txt
+   # Équipe Infrastructure
+   192.168.1.100  # Admin principal
+   192.168.1.101  # Admin secondaire
+   
+   # Équipe Développement
+   192.168.5.0/22 # Réseau dev
+   10.0.1.0/24    # Réseau QA
+   
+   # Accès externe
+   203.0.113.10   # Admin externe
+   ```
+
+2. **Configuration Caddyfile simplifiée** :
+   ```caddy
+   corporate.example.com {
+     maintenance {
+       allowed_ips_file /etc/caddy/maintenance_ips.txt
+       # IPs d'urgence en ligne
+       allowed_ips 192.168.1.1  # Serveur de secours
+     }
+   }
+   ```
+
+3. **Avantages** :
+   - Maintenance séparée des IPs et de la configuration
+   - Documentation claire de chaque IP
+   - Possibilité de versioning du fichier d'IPs
+   - Collaboration facilitée entre équipes
+   - Audit trail des modifications
 
 ## Real World Use Cases
 
@@ -222,21 +267,6 @@ The maintenance plugin enables seamless maintenance mode activation by:
 1. Toggling maintenance on through API call to Caddy's admin interface with request retention timeout configuration 
 2. Caddy instantly retain incoming requests for the predefined period until maintenance mode is disabled or display a maintenance page if timeout is reached
 3. Toggling maintenance off through API, the retained requests are released and forwarded to the backend
-
-### Corporate Network Access During Maintenance
-
-**Scenario**:
-- Corporate website with internal and external users
-- Need to perform maintenance while allowing internal staff access
-- Multiple office locations with different network ranges
-
-**Solution**:
-The maintenance plugin with CIDR support allows:
-1. Configure network ranges for all office locations (e.g., `10.0.0.0/8`, `172.16.0.0/12`)
-2. Allow specific external IPs for remote workers
-3. Enable maintenance mode while internal users continue working
-4. External users see maintenance page
-5. Seamless maintenance without business interruption
 
 ### Automated Maintenance Based on Critical Services Health
 
