@@ -1,6 +1,7 @@
 package fopsMaintenance
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func init() {
@@ -49,10 +51,16 @@ type MaintenanceHandler struct {
 	// Request retention mode timeout in seconds
 	RequestRetentionModeTimeout int `json:"request_retention_mode_timeout,omitempty"`
 
+	// HTTP Basic Authentication configuration
+	AuthRealm string `json:"auth_realm,omitempty"`
+	HtpasswdFile string `json:"htpasswd_file,omitempty"`
+
 	// Pre-parsed IP access control for performance
 	allowedIndividualIPs []net.IP
 	allowedNetworks      []*net.IPNet
 
+	// Pre-parsed htpasswd entries for performance
+	htpasswdEntries map[string][]byte
 	logger *zap.Logger
 	ctx    caddy.Context
 }
@@ -78,6 +86,11 @@ func (h *MaintenanceHandler) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("failed to parse allowed IPs: %v", err)
 	}
 
+
+	// Pre-parse htpasswd file for performance
+	if err := h.parseHtpasswdFile(); err != nil {
+		return fmt.Errorf("failed to parse htpasswd file: %v", err)
+	}
 	// Load template file if path is provided
 	if h.HTMLTemplate != "" {
 		content, err := os.ReadFile(h.HTMLTemplate)
@@ -198,6 +211,210 @@ func (h *MaintenanceHandler) loadIPsFromFile(filePath string) ([]string, error) 
 	return ips, nil
 }
 
+// parseHtpasswdFile parses the htpasswd file and stores credentials in memory
+func (h *MaintenanceHandler) parseHtpasswdFile() error {
+	// Reset map to prevent duplication on multiple calls
+	h.htpasswdEntries = make(map[string][]byte)
+
+	if h.HtpasswdFile == "" {
+		if h.logger != nil {
+			h.logger.Debug("No htpasswd file configured")
+		}
+		return nil // No htpasswd file configured
+	}
+
+	if h.logger != nil {
+		h.logger.Debug("Loading htpasswd file", zap.String("file", h.HtpasswdFile))
+	}
+
+	content, err := os.ReadFile(h.HtpasswdFile)
+	if err != nil {
+		if h.logger != nil {
+			h.logger.Error("Failed to read htpasswd file", zap.String("file", h.HtpasswdFile), zap.Error(err))
+		}
+		return fmt.Errorf("failed to read htpasswd file '%s': %v", h.HtpasswdFile, err)
+	}
+
+	lines := strings.Split(string(content), "\n")
+	loadedUsers := 0
+	
+	for lineNum, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Extract line content (remove inline comments)
+		if commentIndex := strings.Index(line, "#"); commentIndex != -1 {
+			line = strings.TrimSpace(line[:commentIndex])
+		}
+
+		// Skip empty lines after comment removal
+		if line == "" {
+			continue
+		}
+
+		// Parse htpasswd line (username:password_hash)
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			if h.logger != nil {
+				h.logger.Error("Invalid htpasswd format", zap.Int("line", lineNum+1), zap.String("line", line))
+			}
+			return fmt.Errorf("invalid htpasswd format at line %d: expected 'username:password_hash'", lineNum+1)
+		}
+
+		username := strings.TrimSpace(parts[0])
+		passwordHash := strings.TrimSpace(parts[1])
+
+		if username == "" {
+			if h.logger != nil {
+				h.logger.Error("Empty username in htpasswd", zap.Int("line", lineNum+1))
+			}
+			return fmt.Errorf("empty username at line %d", lineNum+1)
+		}
+
+		if passwordHash == "" {
+			if h.logger != nil {
+				h.logger.Error("Empty password hash in htpasswd", zap.Int("line", lineNum+1), zap.String("username", username))
+			}
+			return fmt.Errorf("empty password hash at line %d", lineNum+1)
+		}
+
+		// Store the password hash
+		h.htpasswdEntries[username] = []byte(passwordHash)
+		loadedUsers++
+		
+		if h.logger != nil {
+			h.logger.Debug("Loaded user from htpasswd", zap.String("username", username))
+		}
+	}
+
+	if h.logger != nil {
+		h.logger.Info("Htpasswd file loaded successfully", 
+			zap.String("file", h.HtpasswdFile),
+			zap.Int("users_loaded", loadedUsers),
+		)
+	}
+
+	return nil
+}
+
+// isAuthenticated checks if the request has valid HTTP Basic Authentication
+func (h *MaintenanceHandler) isAuthenticated(r *http.Request) bool {
+	if h.HtpasswdFile == "" || len(h.htpasswdEntries) == 0 {
+		if h.logger != nil {
+			h.logger.Debug("No authentication configured")
+		}
+		return false // No authentication configured
+	}
+
+	// Get Authorization header
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		if h.logger != nil {
+			h.logger.Debug("No Authorization header present")
+		}
+		return false
+	}
+
+	// Check if it's Basic authentication
+	if !strings.HasPrefix(authHeader, "Basic ") {
+		if h.logger != nil {
+			h.logger.Debug("Authorization header is not Basic", zap.String("auth_header", authHeader))
+		}
+		return false
+	}
+
+	// Extract and decode credentials
+	encodedCredentials := strings.TrimPrefix(authHeader, "Basic ")
+	decodedCredentials, err := base64.StdEncoding.DecodeString(encodedCredentials)
+	if err != nil {
+		if h.logger != nil {
+			h.logger.Debug("Failed to decode base64 credentials", zap.Error(err))
+		}
+		return false
+	}
+
+	// Split username and password
+	credentials := strings.SplitN(string(decodedCredentials), ":", 2)
+	if len(credentials) != 2 {
+		if h.logger != nil {
+			h.logger.Debug("Invalid credentials format", zap.String("decoded", string(decodedCredentials)))
+		}
+		return false
+	}
+
+	username := credentials[0]
+	password := credentials[1]
+
+	if h.logger != nil {
+		h.logger.Debug("Checking authentication",
+			zap.String("username", username),
+			zap.Bool("password_provided", password != ""),
+		)
+	}
+
+	// Get stored password hash
+	storedHash, exists := h.htpasswdEntries[username]
+	if !exists {
+		if h.logger != nil {
+			h.logger.Debug("User not found in htpasswd", zap.String("username", username))
+		}
+		return false
+	}
+
+	// Verify password
+	result := h.verifyPassword(password, storedHash)
+	if h.logger != nil {
+		h.logger.Debug("Password verification result", 
+			zap.String("username", username),
+			zap.Bool("valid", result),
+		)
+	}
+	return result
+}
+
+// verifyPassword verifies a password against a stored hash
+func (h *MaintenanceHandler) verifyPassword(password string, storedHash []byte) bool {
+	// Check if it's a bcrypt hash (starts with $2a$, $2b$, or $2y$)
+	if len(storedHash) >= 4 && (storedHash[0] == '$' && storedHash[1] == '2') {
+		// bcrypt hash
+		err := bcrypt.CompareHashAndPassword(storedHash, []byte(password))
+		return err == nil
+	}
+
+	// For other hash types (MD5, SHA1, etc.), we would need additional libraries
+	// For now, we only support bcrypt which is the most secure option
+	return false
+}
+
+// isIPAllowed checks if an IP address is allowed using pre-parsed IPs and networks
+func (h *MaintenanceHandler) isIPAllowed(clientIP string) bool {
+	// Parse client IP
+	ip := net.ParseIP(clientIP)
+	if ip == nil {
+		return false
+	}
+
+	// Check individual IPs first (faster for exact matches)
+	for _, allowedIP := range h.allowedIndividualIPs {
+		if ip.Equal(allowedIP) {
+			return true
+		}
+	}
+
+	// Check CIDR networks
+	for _, network := range h.allowedNetworks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*MaintenanceHandler)(nil)
@@ -220,12 +437,43 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 	if host, _, err := net.SplitHostPort(clientIP); err == nil {
 		clientIP = host
 	}
+	
+	// Debug logging
+	if h.logger != nil {
+		h.logger.Debug("Maintenance mode active",
+			zap.String("client_ip", clientIP),
+			zap.String("user_agent", r.UserAgent()),
+			zap.String("path", r.URL.Path),
+			zap.Bool("htpasswd_configured", h.HtpasswdFile != ""),
+			zap.Int("htpasswd_entries_count", len(h.htpasswdEntries)),
+		)
+	}
+	
 	if h.isIPAllowed(clientIP) {
+		if h.logger != nil {
+			h.logger.Debug("IP allowed, bypassing maintenance", zap.String("client_ip", clientIP))
+		}
+		return next.ServeHTTP(w, r)
+	}
+
+	// Check if client is authenticated via HTTP Basic Auth
+	authResult := h.isAuthenticated(r)
+	if h.logger != nil {
+		h.logger.Debug("Authentication check result",
+			zap.Bool("authenticated", authResult),
+			zap.String("auth_header", r.Header.Get("Authorization")),
+		)
+	}
+	
+	if authResult {
 		return next.ServeHTTP(w, r)
 	}
 
 	// Request retention mode disabled, serve maintenance page now
 	if !temporaryModeEnabled {
+		if h.logger != nil {
+			h.logger.Debug("Serving maintenance page", zap.String("client_ip", clientIP))
+		}
 		return serveMaintenancePage(r, w, h)
 	}
 
@@ -255,30 +503,6 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 	}
 }
 
-// isIPAllowed checks if an IP address is allowed using pre-parsed IPs and networks
-func (h *MaintenanceHandler) isIPAllowed(clientIP string) bool {
-	// Parse client IP
-	ip := net.ParseIP(clientIP)
-	if ip == nil {
-		return false
-	}
-
-	// Check individual IPs first (faster for exact matches)
-	for _, allowedIP := range h.allowedIndividualIPs {
-		if ip.Equal(allowedIP) {
-			return true
-		}
-	}
-
-	// Check CIDR networks
-	for _, network := range h.allowedNetworks {
-		if network.Contains(ip) {
-			return true
-		}
-	}
-
-	return false
-}
 
 func serveMaintenancePage(r *http.Request, w http.ResponseWriter, h *MaintenanceHandler) error {
 	// Set Retry-After header with default value if not specified
@@ -287,7 +511,30 @@ func serveMaintenancePage(r *http.Request, w http.ResponseWriter, h *Maintenance
 		retryAfter = h.RetryAfter
 	}
 	w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
-	w.WriteHeader(http.StatusServiceUnavailable)
+
+	// Check if HTTP Basic Auth is configured
+	if h.HtpasswdFile != "" && len(h.htpasswdEntries) > 0 {
+		realm := "Maintenance Mode"
+		if h.AuthRealm != "" {
+			realm = h.AuthRealm
+		}
+		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Basic realm="%s"`, realm))
+		// Return 401 to prompt for authentication
+		w.WriteHeader(http.StatusUnauthorized)
+		if h.logger != nil {
+			h.logger.Debug("Returning 401 Unauthorized to prompt for authentication",
+				zap.String("realm", realm),
+				zap.String("htpasswd_file", h.HtpasswdFile),
+				zap.Int("users_configured", len(h.htpasswdEntries)),
+			)
+		}
+	} else {
+		// No authentication configured, return 503 for maintenance
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if h.logger != nil {
+			h.logger.Debug("Returning 503 Service Unavailable (no authentication configured)")
+		}
+	}
 
 	// Check if client accepts JSON
 	if isJSONRequest(r) {
@@ -509,6 +756,16 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 					return nil, h.ArgErr()
 				}
 				m.AllowedIPsFile = h.Val()
+			case "auth_realm":
+				if !h.NextArg() {
+					return nil, h.ArgErr()
+				}
+				m.AuthRealm = h.Val()
+			case "htpasswd_file":
+				if !h.NextArg() {
+					return nil, h.ArgErr()
+				}
+				m.HtpasswdFile = h.Val()
 			default:
 				return nil, h.Errf("unknown subdirective '%s'", h.Val())
 			}

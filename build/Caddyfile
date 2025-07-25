@@ -1,9 +1,11 @@
 {
     order maintenance first
+    debug
 }
 
 localhost {
     maintenance {
+        default_enabled true
     }
 
     respond "Hello world!"

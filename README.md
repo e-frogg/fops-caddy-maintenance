@@ -86,6 +86,86 @@ Add the maintenance directive to your Caddyfile:
 | `default_enabled` | Enable maintenance mode by default at startup | No |
 | `status_file` | Path to file for persisting maintenance status | No |
 | `request_retention_mode_timeout` | Time in seconds to retain requests during maintenance | No |
+| `htpasswd_file` | Path to htpasswd file for HTTP Basic Authentication | No |
+| `auth_realm` | Custom realm name for HTTP Basic Authentication | No |
+
+### IP Access Control with CIDR Support
+
+The `allowed_ips` directive supports both individual IP addresses and CIDR notation for network ranges, with full IPv4 and IPv6 support:
+
+```caddy
+maintenance {
+  # Individual IP addresses (IPv4 and IPv6)
+  allowed_ips 192.168.1.100 10.0.0.50 2001:db8::1 ::1
+  
+  # CIDR network ranges (IPv4 and IPv6)
+  allowed_ips 192.168.5.0/22 10.0.1.0/24 172.16.0.0/16 2001:db8::/32
+  
+  # Mixed individual IPs and CIDR ranges
+  allowed_ips 192.168.1.100 192.168.5.0/22 10.0.1.0/24 2001:db8::/32
+}
+```
+
+**CIDR Examples:**
+- `192.168.5.0/22` - Allows IPv4 addresses from 192.168.5.0 to 192.168.7.255
+- `10.0.1.0/24` - Allows IPv4 addresses from 10.0.1.0 to 10.0.1.255
+- `172.16.0.0/16` - Allows IPv4 addresses from 172.16.0.0 to 172.16.255.255
+- `2001:db8::/32` - Allows IPv6 addresses in the 2001:db8::/32 range
+- `::/128` - Allows only the IPv6 loopback address (::1)
+
+**Important:** The plugin uses the client's direct IP address (`r.RemoteAddr`) and does not evaluate proxy headers like `X-Forwarded-For` or `X-Real-IP`. If your server is behind a proxy, you must whitelist the proxy's IP address rather than the original client IPs.
+
+### HTTP Basic Authentication
+
+The plugin supports HTTP Basic Authentication using htpasswd files, providing an additional layer of access control during maintenance mode.
+
+#### Configuration
+
+```caddy
+maintenance {
+  # Path to htpasswd file
+  htpasswd_file /etc/caddy/.htpasswd
+  # Custom realm name (optional, defaults to "Maintenance Mode")
+  auth_realm "Maintenance Access"
+}
+```
+
+#### Creating htpasswd Files
+
+The plugin supports bcrypt hashed passwords for security. You can create htpasswd files using standard tools:
+
+**Using htpasswd command (Apache):**
+```bash
+htpasswd -nbB admin admin
+```
+
+#### htpasswd File Format
+
+The htpasswd file supports comments and follows the standard format:
+
+```txt
+# Maintenance access users
+admin:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi
+user1:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi
+user2:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi
+```
+
+**Supported Hash Types:**
+- **bcrypt** (`$2a$`, `$2b$`, `$2y$`) - **Recommended and fully supported**
+- Other hash types (MD5, SHA1, etc.) are not supported for security reasons
+
+#### Access Control Priority
+
+When both IP-based access control and HTTP Basic Authentication are configured, the plugin checks access in the following order:
+
+1. **IP-based access** - If the client IP is in the allowed list, access is granted immediately
+2. **HTTP Basic Authentication** - If IP access is denied, authentication credentials are checked
+3. **Maintenance page** - If both checks fail, the maintenance page is displayed
+
+This allows for flexible access control scenarios:
+- Internal users can access via IP whitelist (no authentication required)
+- External users can access via authentication credentials
+- All other users see the maintenance page
 
 ### IP Access Control with CIDR Support
 
@@ -179,67 +259,6 @@ example.com {
   }
 }
 ```
-
-### Corporate Network Access During Maintenance
-
-**Scenario**:
-- Corporate website with internal and external users
-- Need to perform maintenance while allowing internal staff access
-- Multiple office locations with different network ranges
-
-**Solution**:
-The maintenance plugin with CIDR support allows:
-1. Configure network ranges for all office locations (e.g., `10.0.0.0/8`, `172.16.0.0/12`)
-2. Allow specific external IPs for remote workers
-3. Enable maintenance mode while internal users continue working
-4. External users see maintenance page
-5. Seamless maintenance without business interruption
-
-### Gestion centralisée des accès avec fichiers d'IPs
-
-**Scenario**:
-- Organisation avec plusieurs équipes et sites
-- Besoin de maintenir une liste d'IPs autorisées complexe
-- Équipes distribuées avec différents niveaux d'accès
-- Audit et traçabilité des modifications
-
-**Solution**:
-La fonctionnalité `allowed_ips_file` permet une gestion centralisée :
-
-1. **Organisation par équipe** :
-   ```txt
-   # /etc/caddy/maintenance_ips.txt
-   # Équipe Infrastructure
-   192.168.1.100  # Admin principal
-   192.168.1.101  # Admin secondaire
-   
-   # Équipe Développement
-   192.168.5.0/22 # Réseau dev
-   10.0.1.0/24    # Réseau QA
-   
-   # Accès externe
-   203.0.113.10   # Admin externe
-   ```
-
-2. **Configuration Caddyfile simplifiée** :
-   ```caddy
-   corporate.example.com {
-     maintenance {
-       allowed_ips_file /etc/caddy/maintenance_ips.txt
-       # IPs d'urgence en ligne
-       allowed_ips 192.168.1.1  # Serveur de secours
-     }
-   }
-   ```
-
-3. **Avantages** :
-   - Maintenance séparée des IPs et de la configuration
-   - Documentation claire de chaque IP
-   - Possibilité de versioning du fichier d'IPs
-   - Collaboration facilitée entre équipes
-   - Audit trail des modifications
-
-## Real World Use Cases
 
 ### Website Maintenance Management Made Easy
 
