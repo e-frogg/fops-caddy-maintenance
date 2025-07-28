@@ -2486,3 +2486,211 @@ func TestMaintenanceHandler_CombinedAccessControl(t *testing.T) {
 		})
 	}
 }
+
+func TestMaintenanceHandler_BypassPaths(t *testing.T) {
+	tests := []struct {
+		name           string
+		bypassPaths    []string
+		requestPath    string
+		expectedBypass bool
+	}{
+		{
+			name:           "No bypass paths configured",
+			bypassPaths:    []string{},
+			requestPath:    "/.well-known/mercure",
+			expectedBypass: false,
+		},
+		{
+			name:           "Exact path match",
+			bypassPaths:    []string{"/.well-known/mercure"},
+			requestPath:    "/.well-known/mercure",
+			expectedBypass: true,
+		},
+		{
+			name:           "Directory wildcard match",
+			bypassPaths:    []string{"/.well-known/*"},
+			requestPath:    "/.well-known/mercure",
+			expectedBypass: true,
+		},
+		{
+			name:           "Directory wildcard match nested",
+			bypassPaths:    []string{"/.well-known/*"},
+			requestPath:    "/.well-known/mercure/hub",
+			expectedBypass: true,
+		},
+		{
+			name:           "Root path bypass",
+			bypassPaths:    []string{"/"},
+			requestPath:    "/",
+			expectedBypass: true,
+		},
+		{
+			name:           "Root path bypass with trailing slash",
+			bypassPaths:    []string{"/"},
+			requestPath:    "/",
+			expectedBypass: true,
+		},
+		{
+			name:           "Multiple bypass paths",
+			bypassPaths:    []string{"/.well-known/*", "/health", "/status"},
+			requestPath:    "/health",
+			expectedBypass: true,
+		},
+		{
+			name:           "Path not in bypass list",
+			bypassPaths:    []string{"/.well-known/*", "/health"},
+			requestPath:    "/api/users",
+			expectedBypass: false,
+		},
+		{
+			name:           "Case sensitive match",
+			bypassPaths:    []string{"/.well-known/mercure"},
+			requestPath:    "/.WELL-KNOWN/MERCURE",
+			expectedBypass: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &MaintenanceHandler{
+				BypassPaths: tt.bypassPaths,
+			}
+
+			result := h.isPathBypassed(tt.requestPath)
+			if result != tt.expectedBypass {
+				t.Errorf("isPathBypassed() = %v, want %v for path %s with bypass paths %v", 
+					result, tt.expectedBypass, tt.requestPath, tt.bypassPaths)
+			}
+		})
+	}
+}
+
+func TestMaintenanceHandler_ServeHTTP_BypassPaths(t *testing.T) {
+	// Create a test handler that records if it was called
+	var handlerCalled bool
+	var capturedRequest *http.Request
+	
+	testHandler := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		handlerCalled = true
+		capturedRequest = r
+		w.WriteHeader(http.StatusOK)
+		return nil
+	})
+
+	// Test with bypass path configured
+	h := &MaintenanceHandler{
+		enabled:     true,
+		BypassPaths: []string{"/.well-known/*", "/health"},
+	}
+
+	// Test request to bypassed path
+	req := httptest.NewRequest("GET", "/.well-known/mercure", nil)
+	w := httptest.NewRecorder()
+
+	err := h.ServeHTTP(w, req, testHandler)
+	if err != nil {
+		t.Fatalf("ServeHTTP() error = %v", err)
+	}
+
+	if !handlerCalled {
+		t.Error("Handler was not called for bypassed path")
+	}
+
+	if capturedRequest.URL.Path != "/.well-known/mercure" {
+		t.Errorf("Captured request path = %v, want %v", capturedRequest.URL.Path, "/.well-known/mercure")
+	}
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Response code = %v, want %v", w.Code, http.StatusOK)
+	}
+
+	// Reset for next test
+	handlerCalled = false
+	capturedRequest = nil
+
+	// Test request to non-bypassed path (should show maintenance page)
+	req = httptest.NewRequest("GET", "/api/users", nil)
+	w = httptest.NewRecorder()
+
+	err = h.ServeHTTP(w, req, testHandler)
+	if err != nil {
+		t.Fatalf("ServeHTTP() error = %v", err)
+	}
+
+	if handlerCalled {
+		t.Error("Handler was called for non-bypassed path")
+	}
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("Response code = %v, want %v", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestParseCaddyfile_BypassPaths(t *testing.T) {
+	tests := []struct {
+		name        string
+		caddyfile   string
+		expectError bool
+		expected    []string
+	}{
+		{
+			name: "Single bypass path",
+			caddyfile: `maintenance {
+				bypass_paths /.well-known/*
+			}`,
+			expectError: false,
+			expected:    []string{"/.well-known/*"},
+		},
+		{
+			name: "Multiple bypass paths",
+			caddyfile: `maintenance {
+				bypass_paths /.well-known/* /health /status
+			}`,
+			expectError: false,
+			expected:    []string{"/.well-known/*", "/health", "/status"},
+		},
+		{
+			name: "Bypass paths with other options",
+			caddyfile: `maintenance {
+				bypass_paths /.well-known/*
+				default_enabled true
+				retry_after 300
+			}`,
+			expectError: false,
+			expected:    []string{"/.well-known/*"},
+		},
+		{
+			name: "Empty bypass paths",
+			caddyfile: `maintenance {
+				bypass_paths
+			}`,
+			expectError: false,
+			expected:    nil, // Le parser retourne nil quand aucun argument n'est fourni
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a new dispenser with the test input
+			d := caddyfile.NewTestDispenser(tt.caddyfile)
+
+			// Parse the Caddyfile
+			h := httpcaddyfile.Helper{Dispenser: d}
+			actual, err := parseCaddyfile(h)
+
+			// Check error expectations
+			if tt.expectError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+
+			// Type assert and compare the results
+			actualHandler, ok := actual.(*MaintenanceHandler)
+			require.True(t, ok)
+
+			// Compare BypassPaths
+			assert.Equal(t, tt.expected, actualHandler.BypassPaths)
+		})
+	}
+}

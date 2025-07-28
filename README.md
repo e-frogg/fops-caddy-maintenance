@@ -88,6 +88,7 @@ Add the maintenance directive to your Caddyfile:
 | `request_retention_mode_timeout` | Time in seconds to retain requests during maintenance | No |
 | `htpasswd_file` | Path to htpasswd file for HTTP Basic Authentication | No |
 | `auth_realm` | Custom realm name for HTTP Basic Authentication | No |
+| `bypass_paths` | Path(s) without maintenance | No |
 
 ### IP Access Control with CIDR Support
 
