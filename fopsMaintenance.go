@@ -55,6 +55,9 @@ type MaintenanceHandler struct {
 	AuthRealm string `json:"auth_realm,omitempty"`
 	HtpasswdFile string `json:"htpasswd_file,omitempty"`
 
+	// Paths that should bypass maintenance mode completely
+	BypassPaths []string `json:"bypass_paths,omitempty"`
+
 	// Pre-parsed IP access control for performance
 	allowedIndividualIPs []net.IP
 	allowedNetworks      []*net.IPNet
@@ -415,6 +418,44 @@ func (h *MaintenanceHandler) isIPAllowed(clientIP string) bool {
 	return false
 }
 
+// isPathBypassed checks if a request path should bypass maintenance mode completely
+func (h *MaintenanceHandler) isPathBypassed(path string) bool {
+	if len(h.BypassPaths) == 0 {
+		return false
+	}
+
+	// Normalize path for comparison
+	path = strings.TrimSuffix(path, "/")
+	if path == "" {
+		path = "/"
+	}
+
+	for _, bypassPath := range h.BypassPaths {
+		bypassPath = strings.TrimSuffix(bypassPath, "/")
+		if bypassPath == "" {
+			bypassPath = "/"
+		}
+
+		// Exact match
+		if path == bypassPath {
+			return true
+		}
+
+		// Prefix match (for directories)
+		if strings.HasSuffix(bypassPath, "/*") {
+			prefix := strings.TrimSuffix(bypassPath, "/*")
+			if prefix == "" {
+				prefix = "/"
+			}
+			if strings.HasPrefix(path, prefix) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*MaintenanceHandler)(nil)
@@ -429,6 +470,17 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 	h.enabledMux.RUnlock()
 
 	if !enabled {
+		return next.ServeHTTP(w, r)
+	}
+
+	// Check if path should bypass maintenance mode completely
+	if h.isPathBypassed(r.URL.Path) {
+		if h.logger != nil {
+			h.logger.Debug("Path bypassed, forwarding request", 
+				zap.String("path", r.URL.Path),
+				zap.Strings("bypass_paths", h.BypassPaths),
+			)
+		}
 		return next.ServeHTTP(w, r)
 	}
 
@@ -766,6 +818,11 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 					return nil, h.ArgErr()
 				}
 				m.HtpasswdFile = h.Val()
+			case "bypass_paths":
+				// Parse multiple paths until the end of the line
+				for h.NextArg() {
+					m.BypassPaths = append(m.BypassPaths, h.Val())
+				}
 			default:
 				return nil, h.Errf("unknown subdirective '%s'", h.Val())
 			}
