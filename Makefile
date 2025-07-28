@@ -1,8 +1,8 @@
 # Variables
 BINARY_NAME=caddy
 BUILD_DIR=build
-XCADDY=xcaddy
-MODULE_PATH=github.com/e-frogg/frops-caddy-maintenance
+XCADDY=~/go/bin/xcaddy
+MODULE_PATH=github.com/e-frogg/fops-caddy-maintenance
 
 # Colors for terminal output
 GREEN=\033[0;32m

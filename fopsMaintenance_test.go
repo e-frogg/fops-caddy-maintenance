@@ -494,7 +494,6 @@ func TestMaintenanceHandler_ServeHTTP_AllowedIPs(t *testing.T) {
 			h := &MaintenanceHandler{
 				AllowedIPs: tt.allowedIPs,
 			}
-
 			// Test Provision (this will parse the IPs)
 			ctx := caddy.Context{}
 			err := h.Provision(ctx)
@@ -506,6 +505,7 @@ func TestMaintenanceHandler_ServeHTTP_AllowedIPs(t *testing.T) {
 			require.NoError(t, err)
 
 			// Set maintenance mode
+			
 			h.enabledMux.Lock()
 			h.enabled = true
 			h.enabledMux.Unlock()
@@ -1537,6 +1537,54 @@ func TestParseCaddyfile_NewOptions(t *testing.T) {
 				AllowedIPsFile: "/etc/caddy/allowed_ips.txt",
 			},
 		},
+		{
+			name: "HTTP Basic Authentication",
+			input: `maintenance {
+				htpasswd_file /etc/caddy/.htpasswd
+				auth_realm "Maintenance Access"
+			}`,
+			expectedM: &MaintenanceHandler{
+				HtpasswdFile: "/etc/caddy/.htpasswd",
+				AuthRealm:    "Maintenance Access",
+			},
+		},
+		{
+			name: "Complete configuration with authentication",
+			input: `maintenance {
+				template /path/to/template.html
+				allowed_ips 192.168.1.100 10.0.0.1
+				retry_after 600
+				default_enabled true
+				status_file /var/lib/caddy/maintenance.json
+				request_retention_mode_timeout 30
+				htpasswd_file /etc/caddy/.htpasswd
+				auth_realm "Maintenance Access"
+			}`,
+			expectedM: &MaintenanceHandler{
+				HTMLTemplate:                "/path/to/template.html",
+				AllowedIPs:                  []string{"192.168.1.100", "10.0.0.1"},
+				RetryAfter:                  600,
+				DefaultEnabled:              true,
+				StatusFile:                  "/var/lib/caddy/maintenance.json",
+				RequestRetentionModeTimeout: 30,
+				HtpasswdFile:                "/etc/caddy/.htpasswd",
+				AuthRealm:                   "Maintenance Access",
+			},
+		},
+		{
+			name: "Missing auth_realm value",
+			input: `maintenance {
+				auth_realm
+			}`,
+			expectErr: true,
+		},
+		{
+			name: "Missing htpasswd_file value",
+			input: `maintenance {
+				htpasswd_file
+			}`,
+			expectErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -2021,6 +2069,420 @@ func TestLoadIPsFromFile(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.ElementsMatch(t, tt.expectedIPs, loadedIPs, "Loaded IPs should match expected IPs")
+		})
+	}
+}
+
+func TestMaintenanceHandler_HTTPBasicAuth(t *testing.T) {
+	// Create temporary directory for test files
+	tmpDir := t.TempDir()
+
+	// Create htpasswd file with bcrypt hash
+	htpasswdContent := `# Test users
+admin:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi  # password: password
+user:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi   # password: password
+# Comment line
+invalid_user:invalid_hash
+`
+
+	htpasswdFile := filepath.Join(tmpDir, "test.htpasswd")
+	err := os.WriteFile(htpasswdFile, []byte(htpasswdContent), 0644)
+	require.NoError(t, err, "Failed to write htpasswd file")
+
+	tests := []struct {
+		name           string
+		setupHandler   func() *MaintenanceHandler
+		setupRequest   func() *http.Request
+		expectedStatus int
+		expectAuth     bool
+	}{
+		{
+			name: "No Authentication - Should See Maintenance Page",
+			setupHandler: func() *MaintenanceHandler {
+				h := &MaintenanceHandler{
+					DefaultEnabled: true,
+				}
+				return h
+			},
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest("GET", "http://example.com", nil)
+			},
+			expectedStatus: http.StatusServiceUnavailable,
+			expectAuth:     false,
+		},
+		{
+			name: "Valid Authentication - Should Bypass Maintenance",
+			setupHandler: func() *MaintenanceHandler {
+				h := &MaintenanceHandler{
+					HtpasswdFile: htpasswdFile,
+					AuthRealm:    "Test Realm",
+					DefaultEnabled: true,
+				}
+				return h
+			},
+			setupRequest: func() *http.Request {
+				req := httptest.NewRequest("GET", "http://example.com", nil)
+				// admin:password encoded in base64
+				req.Header.Set("Authorization", "Basic YWRtaW46cGFzc3dvcmQ=")
+				return req
+			},
+			expectedStatus: http.StatusOK,
+			expectAuth:     true,
+		},
+		{
+			name: "Invalid Authentication - Should See Maintenance Page",
+			setupHandler: func() *MaintenanceHandler {
+				h := &MaintenanceHandler{
+					HtpasswdFile: htpasswdFile,
+					AuthRealm:    "Test Realm",
+					DefaultEnabled: true,
+				}
+				return h
+			},
+			setupRequest: func() *http.Request {
+				req := httptest.NewRequest("GET", "http://example.com", nil)
+				// admin:wrongpassword encoded in base64
+				req.Header.Set("Authorization", "Basic YWRtaW46d3JvbmdwYXNzd29yZA==")
+				return req
+			},
+			expectedStatus: http.StatusUnauthorized,
+			expectAuth:     false,
+		},
+		{
+			name: "No Authorization Header - Should See Maintenance Page",
+			setupHandler: func() *MaintenanceHandler {
+				h := &MaintenanceHandler{
+					HtpasswdFile: htpasswdFile,
+					AuthRealm:    "Test Realm",
+					DefaultEnabled: true,
+				}
+				return h
+			},
+			setupRequest: func() *http.Request {
+				return httptest.NewRequest("GET", "http://example.com", nil)
+			},
+			expectedStatus: http.StatusUnauthorized,
+			expectAuth:     false,
+		},
+		{
+			name: "Invalid Authorization Format - Should See Maintenance Page",
+			setupHandler: func() *MaintenanceHandler {
+				h := &MaintenanceHandler{
+					HtpasswdFile: htpasswdFile,
+					AuthRealm:    "Test Realm",
+					DefaultEnabled: true,
+				}
+				return h
+			},
+			setupRequest: func() *http.Request {
+				req := httptest.NewRequest("GET", "http://example.com", nil)
+				req.Header.Set("Authorization", "InvalidFormat")
+				return req
+			},
+			expectedStatus: http.StatusUnauthorized,
+			expectAuth:     false,
+		},
+		{
+			name: "Non-existent User - Should See Maintenance Page",
+			setupHandler: func() *MaintenanceHandler {
+				h := &MaintenanceHandler{
+					HtpasswdFile: htpasswdFile,
+					AuthRealm:    "Test Realm",
+					DefaultEnabled: true,
+				}
+				return h
+			},
+			setupRequest: func() *http.Request {
+				req := httptest.NewRequest("GET", "http://example.com", nil)
+				// nonexistent:password encoded in base64
+				req.Header.Set("Authorization", "Basic bm9uZXhpc3RlbnQ6cGFzc3dvcmQ=")
+				return req
+			},
+			expectedStatus: http.StatusUnauthorized,
+			expectAuth:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := tt.setupHandler()
+
+			// Provision the handler to load htpasswd file
+			ctx := caddy.Context{}
+			err := h.Provision(ctx)
+			require.NoError(t, err)
+
+			req := tt.setupRequest()
+			w := httptest.NewRecorder()
+
+			// Create next handler that sets a specific header
+			next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+				w.Header().Set("X-Test", "request-processed")
+				w.WriteHeader(http.StatusOK)
+				return nil
+			})
+
+			// Execute handler
+			err = h.ServeHTTP(w, req, next)
+			require.NoError(t, err)
+
+			// Check status code
+			assert.Equal(t, tt.expectedStatus, w.Code)
+
+			if tt.expectAuth {
+				// Verify the request was passed to next handler
+				assert.Equal(t, "request-processed", w.Header().Get("X-Test"))
+			} else {
+				// Check for WWW-Authenticate header if authentication is configured
+				if h.HtpasswdFile != "" {
+					wwwAuth := w.Header().Get("WWW-Authenticate")
+					assert.Contains(t, wwwAuth, "Basic realm=")
+					if h.AuthRealm != "" {
+						assert.Contains(t, wwwAuth, h.AuthRealm)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestMaintenanceHandler_ParseHtpasswdFile(t *testing.T) {
+	// Create temporary directory
+	tmpDir := t.TempDir()
+
+	tests := []struct {
+		name          string
+		fileContent   string
+		expectError   bool
+		errorContains string
+		expectedUsers []string
+	}{
+		{
+			name: "Valid htpasswd file",
+			fileContent: `# Test users
+admin:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi
+user:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi
+`,
+			expectedUsers: []string{"admin", "user"},
+		},
+		{
+			name: "Empty file",
+			fileContent: `# Empty file
+`,
+			expectedUsers: []string{},
+		},
+		{
+			name: "Only comments",
+			fileContent: `# This is a comment
+# Another comment`,
+			expectedUsers: []string{},
+		},
+		{
+			name: "Invalid format - missing colon",
+			fileContent: `admin$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi`,
+			expectError:   true,
+			errorContains: "invalid htpasswd format",
+		},
+		{
+			name: "Empty username",
+			fileContent: `:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi`,
+			expectError:   true,
+			errorContains: "empty username",
+		},
+		{
+			name: "Empty password hash",
+			fileContent: `admin:`,
+			expectError:   true,
+			errorContains: "empty password hash",
+		},
+		{
+			name: "Mixed valid and invalid",
+			fileContent: `admin:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi
+invalid_format
+user:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi`,
+			expectError:   true,
+			errorContains: "invalid htpasswd format",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a unique file for each test case
+			htpasswdFile := filepath.Join(tmpDir, fmt.Sprintf("test_%s.htpasswd", strings.ReplaceAll(tt.name, " ", "_")))
+
+			// Write test file
+			err := os.WriteFile(htpasswdFile, []byte(tt.fileContent), 0644)
+			require.NoError(t, err, "Failed to write htpasswd file")
+
+			// Create handler
+			h := &MaintenanceHandler{
+				HtpasswdFile: htpasswdFile,
+			}
+
+			// Test parseHtpasswdFile
+			err = h.parseHtpasswdFile()
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+				return
+			}
+
+			require.NoError(t, err)
+
+			// Verify that users were loaded correctly
+			var actualUsers []string
+			for username := range h.htpasswdEntries {
+				actualUsers = append(actualUsers, username)
+			}
+			assert.ElementsMatch(t, tt.expectedUsers, actualUsers, "Loaded users should match expected users")
+		})
+	}
+}
+
+func TestMaintenanceHandler_VerifyPassword(t *testing.T) {
+	h := &MaintenanceHandler{}
+
+	tests := []struct {
+		name         string
+		password     string
+		storedHash   []byte
+		expectValid  bool
+	}{
+		{
+			name:         "Valid bcrypt hash",
+			password:     "password",
+			storedHash:   []byte("$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi"),
+			expectValid:  true,
+		},
+		{
+			name:         "Invalid password with valid bcrypt hash",
+			password:     "wrongpassword",
+			storedHash:   []byte("$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi"),
+			expectValid:  false,
+		},
+		{
+			name:         "Non-bcrypt hash (unsupported)",
+			password:     "password",
+			storedHash:   []byte("$1$salt$hash"),
+			expectValid:  false,
+		},
+		{
+			name:         "Plain text (unsupported)",
+			password:     "password",
+			storedHash:   []byte("password"),
+			expectValid:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := h.verifyPassword(tt.password, tt.storedHash)
+			assert.Equal(t, tt.expectValid, result)
+		})
+	}
+}
+
+func TestMaintenanceHandler_CombinedAccessControl(t *testing.T) {
+	// Create temporary directory
+	tmpDir := t.TempDir()
+
+	// Create htpasswd file
+	htpasswdContent := `admin:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi`
+	htpasswdFile := filepath.Join(tmpDir, "test.htpasswd")
+	err := os.WriteFile(htpasswdFile, []byte(htpasswdContent), 0644)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name           string
+		allowedIPs     []string
+		clientIP       string
+		authHeader     string
+		expectedStatus int
+		expectBypass   bool
+	}{
+		{
+			name:           "IP Allowed - Should Bypass",
+			allowedIPs:     []string{"192.168.1.100"},
+			clientIP:       "192.168.1.100",
+			expectedStatus: http.StatusOK,
+			expectBypass:   true,
+		},
+		{
+			name:           "Auth Valid - Should Bypass",
+			allowedIPs:     []string{"192.168.1.100"},
+			clientIP:       "192.168.1.101",
+			authHeader:     "Basic YWRtaW46cGFzc3dvcmQ=", // admin:password
+			expectedStatus: http.StatusOK,
+			expectBypass:   true,
+		},
+		{
+			name:           "Neither IP nor Auth - Should Block",
+			allowedIPs:     []string{"192.168.1.100"},
+			clientIP:       "192.168.1.101",
+			expectedStatus: http.StatusUnauthorized,
+			expectBypass:   false,
+		},
+		{
+			name:           "Both IP and Auth - Should Bypass (IP takes precedence)",
+			allowedIPs:     []string{"192.168.1.100"},
+			clientIP:       "192.168.1.100",
+			authHeader:     "Basic YWRtaW46cGFzc3dvcmQ=",
+			expectedStatus: http.StatusOK,
+			expectBypass:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &MaintenanceHandler{
+				AllowedIPs:   tt.allowedIPs,
+				HtpasswdFile: htpasswdFile,
+				AuthRealm:    "Test Realm",
+			}
+
+			// Provision the handler
+			ctx := caddy.Context{}
+			err := h.Provision(ctx)
+			require.NoError(t, err)
+
+			// Enable maintenance mode
+			h.enabledMux.Lock()
+			h.enabled = true
+			h.enabledMux.Unlock()
+
+			// Create request
+			req := httptest.NewRequest("GET", "http://example.com", nil)
+			req.RemoteAddr = tt.clientIP
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
+			}
+
+			w := httptest.NewRecorder()
+
+			// Create next handler
+			next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+				w.Header().Set("X-Test", "request-processed")
+				w.WriteHeader(http.StatusOK)
+				return nil
+			})
+
+			// Execute handler
+			err = h.ServeHTTP(w, req, next)
+			require.NoError(t, err)
+
+			// Check status code
+			assert.Equal(t, tt.expectedStatus, w.Code)
+
+			if tt.expectBypass {
+				assert.Equal(t, "request-processed", w.Header().Get("X-Test"))
+			} else {
+				// Check for WWW-Authenticate header
+				wwwAuth := w.Header().Get("WWW-Authenticate")
+				assert.Contains(t, wwwAuth, "Basic realm=")
+			}
 		})
 	}
 }
