@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -115,6 +116,145 @@ func TestMaintenanceHandler(t *testing.T) {
 				}
 				assert.Equal(t, expectedRetryAfter, w.Header().Get("Retry-After"))
 			}
+		})
+	}
+}
+
+func TestParseTrustedProxiesValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		handler     MaintenanceHandler
+		expectError bool
+	}{
+		{
+			name: "forwarded headers disabled without proxies",
+			handler: MaintenanceHandler{
+				UseForwardedHeaders: false,
+			},
+			expectError: false,
+		},
+		{
+			name: "forwarded headers enabled without proxies",
+			handler: MaintenanceHandler{
+				UseForwardedHeaders: true,
+			},
+			expectError: true,
+		},
+		{
+			name: "invalid proxy entry",
+			handler: MaintenanceHandler{
+				UseForwardedHeaders: true,
+				TrustedProxies:      []string{"not-an-ip"},
+			},
+			expectError: true,
+		},
+		{
+			name: "valid proxies parsed",
+			handler: MaintenanceHandler{
+				UseForwardedHeaders: true,
+				TrustedProxies:      []string{"192.0.2.10", "198.51.100.0/24"},
+			},
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.handler.parseTrustedProxies()
+			if tt.expectError {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			if tt.handler.UseForwardedHeaders {
+				require.Len(t, tt.handler.trustedProxyIPs, 1)
+				require.Len(t, tt.handler.trustedProxyNetworks, 1)
+				require.True(t, tt.handler.trustedProxyIPs[0].Equal(net.ParseIP("192.0.2.10")))
+			}
+		})
+	}
+}
+
+func TestMaintenanceHandler_getClientIP(t *testing.T) {
+	tests := []struct {
+		name           string
+		useForwarded   bool
+		trusted        []string
+		remoteAddr     string
+		headers        map[string]string
+		expectedClient string
+	}{
+		{
+			name:           "forwarded headers disabled returns remote host",
+			useForwarded:   false,
+			remoteAddr:     "203.0.113.5:12345",
+			expectedClient: "203.0.113.5",
+		},
+		{
+			name:         "remote not trusted ignores forwarded headers",
+			useForwarded: true,
+			trusted:      []string{"192.0.2.1"},
+			remoteAddr:   "198.51.100.2:12345",
+			headers: map[string]string{
+				"X-Forwarded-For": "203.0.113.5",
+				"X-Real-IP":       "203.0.113.6",
+			},
+			expectedClient: "198.51.100.2",
+		},
+		{
+			name:         "extracts first non-trusted from X-Forwarded-For",
+			useForwarded: true,
+			trusted:      []string{"192.0.2.1", "198.51.100.3"},
+			remoteAddr:   "192.0.2.1:443",
+			headers: map[string]string{
+				"X-Forwarded-For": "203.0.113.5, 198.51.100.3",
+				"X-Real-IP":       "198.51.100.4",
+			},
+			expectedClient: "203.0.113.5",
+		},
+		{
+			name:         "falls back to X-Real-IP when XFF only has proxies",
+			useForwarded: true,
+			trusted:      []string{"192.0.2.1", "198.51.100.3"},
+			remoteAddr:   "192.0.2.1:443",
+			headers: map[string]string{
+				"X-Forwarded-For": "192.0.2.1, 198.51.100.3",
+				"X-Real-IP":       "203.0.113.7",
+			},
+			expectedClient: "203.0.113.7",
+		},
+		{
+			name:         "falls back to remote when headers invalid",
+			useForwarded: true,
+			trusted:      []string{"192.0.2.1"},
+			remoteAddr:   "192.0.2.1:443",
+			headers: map[string]string{
+				"X-Forwarded-For": "not-an-ip, 192.0.2.1",
+				"X-Real-IP":       "also-invalid",
+			},
+			expectedClient: "192.0.2.1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &MaintenanceHandler{
+				UseForwardedHeaders: tt.useForwarded,
+				TrustedProxies:      tt.trusted,
+			}
+
+			err := h.parseTrustedProxies()
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodGet, "http://example.com", nil)
+			req.RemoteAddr = tt.remoteAddr
+			for key, value := range tt.headers {
+				req.Header.Set(key, value)
+			}
+
+			clientIP := h.getClientIP(req)
+			assert.Equal(t, tt.expectedClient, clientIP)
 		})
 	}
 }
@@ -505,7 +645,7 @@ func TestMaintenanceHandler_ServeHTTP_AllowedIPs(t *testing.T) {
 			require.NoError(t, err)
 
 			// Set maintenance mode
-			
+
 			h.enabledMux.Lock()
 			h.enabled = true
 			h.enabledMux.Unlock()
@@ -1349,7 +1489,12 @@ func TestMaintenanceHandler_StatusPersistenceErrors(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.name == "Write Error - Permission Denied" && os.Geteuid() == 0 {
+				t.Skip("skipping permission denied scenario when running as root")
+			}
+
 			// Setup handler
 			tt.setupHandler()
 
@@ -2114,8 +2259,8 @@ invalid_user:invalid_hash
 			name: "Valid Authentication - Should Bypass Maintenance",
 			setupHandler: func() *MaintenanceHandler {
 				h := &MaintenanceHandler{
-					HtpasswdFile: htpasswdFile,
-					AuthRealm:    "Test Realm",
+					HtpasswdFile:   htpasswdFile,
+					AuthRealm:      "Test Realm",
 					DefaultEnabled: true,
 				}
 				return h
@@ -2133,8 +2278,8 @@ invalid_user:invalid_hash
 			name: "Invalid Authentication - Should See Maintenance Page",
 			setupHandler: func() *MaintenanceHandler {
 				h := &MaintenanceHandler{
-					HtpasswdFile: htpasswdFile,
-					AuthRealm:    "Test Realm",
+					HtpasswdFile:   htpasswdFile,
+					AuthRealm:      "Test Realm",
 					DefaultEnabled: true,
 				}
 				return h
@@ -2152,8 +2297,8 @@ invalid_user:invalid_hash
 			name: "No Authorization Header - Should See Maintenance Page",
 			setupHandler: func() *MaintenanceHandler {
 				h := &MaintenanceHandler{
-					HtpasswdFile: htpasswdFile,
-					AuthRealm:    "Test Realm",
+					HtpasswdFile:   htpasswdFile,
+					AuthRealm:      "Test Realm",
 					DefaultEnabled: true,
 				}
 				return h
@@ -2168,8 +2313,8 @@ invalid_user:invalid_hash
 			name: "Invalid Authorization Format - Should See Maintenance Page",
 			setupHandler: func() *MaintenanceHandler {
 				h := &MaintenanceHandler{
-					HtpasswdFile: htpasswdFile,
-					AuthRealm:    "Test Realm",
+					HtpasswdFile:   htpasswdFile,
+					AuthRealm:      "Test Realm",
 					DefaultEnabled: true,
 				}
 				return h
@@ -2186,8 +2331,8 @@ invalid_user:invalid_hash
 			name: "Non-existent User - Should See Maintenance Page",
 			setupHandler: func() *MaintenanceHandler {
 				h := &MaintenanceHandler{
-					HtpasswdFile: htpasswdFile,
-					AuthRealm:    "Test Realm",
+					HtpasswdFile:   htpasswdFile,
+					AuthRealm:      "Test Realm",
 					DefaultEnabled: true,
 				}
 				return h
@@ -2278,20 +2423,20 @@ user:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi
 			expectedUsers: []string{},
 		},
 		{
-			name: "Invalid format - missing colon",
-			fileContent: `admin$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi`,
+			name:          "Invalid format - missing colon",
+			fileContent:   `admin$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi`,
 			expectError:   true,
 			errorContains: "invalid htpasswd format",
 		},
 		{
-			name: "Empty username",
-			fileContent: `:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi`,
+			name:          "Empty username",
+			fileContent:   `:$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi`,
 			expectError:   true,
 			errorContains: "empty username",
 		},
 		{
-			name: "Empty password hash",
-			fileContent: `admin:`,
+			name:          "Empty password hash",
+			fileContent:   `admin:`,
 			expectError:   true,
 			errorContains: "empty password hash",
 		},
@@ -2346,34 +2491,34 @@ func TestMaintenanceHandler_VerifyPassword(t *testing.T) {
 	h := &MaintenanceHandler{}
 
 	tests := []struct {
-		name         string
-		password     string
-		storedHash   []byte
-		expectValid  bool
+		name        string
+		password    string
+		storedHash  []byte
+		expectValid bool
 	}{
 		{
-			name:         "Valid bcrypt hash",
-			password:     "password",
-			storedHash:   []byte("$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi"),
-			expectValid:  true,
+			name:        "Valid bcrypt hash",
+			password:    "password",
+			storedHash:  []byte("$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi"),
+			expectValid: true,
 		},
 		{
-			name:         "Invalid password with valid bcrypt hash",
-			password:     "wrongpassword",
-			storedHash:   []byte("$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi"),
-			expectValid:  false,
+			name:        "Invalid password with valid bcrypt hash",
+			password:    "wrongpassword",
+			storedHash:  []byte("$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi"),
+			expectValid: false,
 		},
 		{
-			name:         "Non-bcrypt hash (unsupported)",
-			password:     "password",
-			storedHash:   []byte("$1$salt$hash"),
-			expectValid:  false,
+			name:        "Non-bcrypt hash (unsupported)",
+			password:    "password",
+			storedHash:  []byte("$1$salt$hash"),
+			expectValid: false,
 		},
 		{
-			name:         "Plain text (unsupported)",
-			password:     "password",
-			storedHash:   []byte("password"),
-			expectValid:  false,
+			name:        "Plain text (unsupported)",
+			password:    "password",
+			storedHash:  []byte("password"),
+			expectValid: false,
 		},
 	}
 
@@ -2558,7 +2703,7 @@ func TestMaintenanceHandler_BypassPaths(t *testing.T) {
 
 			result := h.isPathBypassed(tt.requestPath)
 			if result != tt.expectedBypass {
-				t.Errorf("isPathBypassed() = %v, want %v for path %s with bypass paths %v", 
+				t.Errorf("isPathBypassed() = %v, want %v for path %s with bypass paths %v",
 					result, tt.expectedBypass, tt.requestPath, tt.bypassPaths)
 			}
 		})
@@ -2569,7 +2714,7 @@ func TestMaintenanceHandler_ServeHTTP_BypassPaths(t *testing.T) {
 	// Create a test handler that records if it was called
 	var handlerCalled bool
 	var capturedRequest *http.Request
-	
+
 	testHandler := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
 		handlerCalled = true
 		capturedRequest = r

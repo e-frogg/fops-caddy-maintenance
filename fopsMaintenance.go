@@ -35,6 +35,12 @@ type MaintenanceHandler struct {
 	// File path containing allowed IPs with comments
 	AllowedIPsFile string `json:"allowed_ips_file,omitempty"`
 
+	// Enable support for forwarded headers (X-Forwarded-For, X-Real-IP)
+	UseForwardedHeaders bool `json:"use_forwarded_headers,omitempty"`
+
+	// List of trusted proxy IPs or CIDR ranges allowed to forward client IPs
+	TrustedProxies []string `json:"trusted_proxies,omitempty"`
+
 	// Retry-After header value in seconds
 	RetryAfter int `json:"retry_after,omitempty"`
 
@@ -52,7 +58,7 @@ type MaintenanceHandler struct {
 	RequestRetentionModeTimeout int `json:"request_retention_mode_timeout,omitempty"`
 
 	// HTTP Basic Authentication configuration
-	AuthRealm string `json:"auth_realm,omitempty"`
+	AuthRealm    string `json:"auth_realm,omitempty"`
 	HtpasswdFile string `json:"htpasswd_file,omitempty"`
 
 	// Paths that should bypass maintenance mode completely
@@ -62,10 +68,14 @@ type MaintenanceHandler struct {
 	allowedIndividualIPs []net.IP
 	allowedNetworks      []*net.IPNet
 
+	// Pre-parsed trusted proxy IPs and networks for forwarded headers
+	trustedProxyIPs      []net.IP
+	trustedProxyNetworks []*net.IPNet
+
 	// Pre-parsed htpasswd entries for performance
 	htpasswdEntries map[string][]byte
-	logger *zap.Logger
-	ctx    caddy.Context
+	logger          *zap.Logger
+	ctx             caddy.Context
 }
 
 // CaddyModule returns the Caddy module information.
@@ -89,6 +99,10 @@ func (h *MaintenanceHandler) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("failed to parse allowed IPs: %v", err)
 	}
 
+	// Pre-parse trusted proxies for forwarded headers support
+	if err := h.parseTrustedProxies(); err != nil {
+		return fmt.Errorf("failed to parse trusted proxies: %v", err)
+	}
 
 	// Pre-parse htpasswd file for performance
 	if err := h.parseHtpasswdFile(); err != nil {
@@ -162,6 +176,41 @@ func (h *MaintenanceHandler) parseAllowedIPs() error {
 			h.allowedIndividualIPs = append(h.allowedIndividualIPs, ip)
 		}
 	}
+	return nil
+}
+
+// parseTrustedProxies pre-parses trusted proxies into IPs and networks
+func (h *MaintenanceHandler) parseTrustedProxies() error {
+	// Reset slices to prevent duplication on multiple calls
+	h.trustedProxyIPs = nil
+	h.trustedProxyNetworks = nil
+
+	if h.UseForwardedHeaders && len(h.TrustedProxies) == 0 {
+		return fmt.Errorf("use_forwarded_headers requires at least one trusted proxy")
+	}
+
+	for _, proxy := range h.TrustedProxies {
+		proxy = strings.TrimSpace(proxy)
+		if proxy == "" {
+			continue
+		}
+
+		if strings.Contains(proxy, "/") {
+			_, ipNet, err := net.ParseCIDR(proxy)
+			if err != nil {
+				return fmt.Errorf("invalid trusted proxy CIDR '%s': %v", proxy, err)
+			}
+			h.trustedProxyNetworks = append(h.trustedProxyNetworks, ipNet)
+			continue
+		}
+
+		ip := net.ParseIP(proxy)
+		if ip == nil {
+			return fmt.Errorf("invalid trusted proxy IP '%s'", proxy)
+		}
+		h.trustedProxyIPs = append(h.trustedProxyIPs, ip)
+	}
+
 	return nil
 }
 
@@ -240,7 +289,7 @@ func (h *MaintenanceHandler) parseHtpasswdFile() error {
 
 	lines := strings.Split(string(content), "\n")
 	loadedUsers := 0
-	
+
 	for lineNum, line := range lines {
 		line = strings.TrimSpace(line)
 
@@ -288,14 +337,14 @@ func (h *MaintenanceHandler) parseHtpasswdFile() error {
 		// Store the password hash
 		h.htpasswdEntries[username] = []byte(passwordHash)
 		loadedUsers++
-		
+
 		if h.logger != nil {
 			h.logger.Debug("Loaded user from htpasswd", zap.String("username", username))
 		}
 	}
 
 	if h.logger != nil {
-		h.logger.Info("Htpasswd file loaded successfully", 
+		h.logger.Info("Htpasswd file loaded successfully",
 			zap.String("file", h.HtpasswdFile),
 			zap.Int("users_loaded", loadedUsers),
 		)
@@ -371,7 +420,7 @@ func (h *MaintenanceHandler) isAuthenticated(r *http.Request) bool {
 	// Verify password
 	result := h.verifyPassword(password, storedHash)
 	if h.logger != nil {
-		h.logger.Debug("Password verification result", 
+		h.logger.Debug("Password verification result",
 			zap.String("username", username),
 			zap.Bool("valid", result),
 		)
@@ -410,6 +459,27 @@ func (h *MaintenanceHandler) isIPAllowed(clientIP string) bool {
 
 	// Check CIDR networks
 	for _, network := range h.allowedNetworks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isTrustedProxy checks whether an IP belongs to the trusted proxy list
+func (h *MaintenanceHandler) isTrustedProxy(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+
+	for _, proxyIP := range h.trustedProxyIPs {
+		if ip.Equal(proxyIP) {
+			return true
+		}
+	}
+
+	for _, network := range h.trustedProxyNetworks {
 		if network.Contains(ip) {
 			return true
 		}
@@ -462,6 +532,52 @@ var (
 	_ caddyhttp.MiddlewareHandler = (*MaintenanceHandler)(nil)
 )
 
+// getClientIP returns the effective client IP, optionally using forwarded headers
+func (h *MaintenanceHandler) getClientIP(r *http.Request) string {
+	clientIP := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(clientIP); err == nil {
+		clientIP = host
+	}
+
+	if !h.UseForwardedHeaders {
+		return clientIP
+	}
+
+	remoteIP := net.ParseIP(clientIP)
+	if remoteIP == nil || !h.isTrustedProxy(remoteIP) {
+		return clientIP
+	}
+
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			candidate := strings.TrimSpace(parts[i])
+			if candidate == "" {
+				continue
+			}
+
+			ip := net.ParseIP(candidate)
+			if ip == nil {
+				continue
+			}
+
+			if h.isTrustedProxy(ip) {
+				continue
+			}
+
+			return candidate
+		}
+	}
+
+	if xrip := strings.TrimSpace(r.Header.Get("X-Real-IP")); xrip != "" {
+		if ip := net.ParseIP(xrip); ip != nil && !h.isTrustedProxy(ip) {
+			return xrip
+		}
+	}
+
+	return clientIP
+}
+
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	h.enabledMux.RLock()
@@ -476,7 +592,7 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 	// Check if path should bypass maintenance mode completely
 	if h.isPathBypassed(r.URL.Path) {
 		if h.logger != nil {
-			h.logger.Debug("Path bypassed, forwarding request", 
+			h.logger.Debug("Path bypassed, forwarding request",
 				zap.String("path", r.URL.Path),
 				zap.Strings("bypass_paths", h.BypassPaths),
 			)
@@ -485,11 +601,8 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 	}
 
 	// Check if client IP is in allowed list
-	clientIP := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(clientIP); err == nil {
-		clientIP = host
-	}
-	
+	clientIP := h.getClientIP(r)
+
 	// Debug logging
 	if h.logger != nil {
 		h.logger.Debug("Maintenance mode active",
@@ -500,7 +613,7 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 			zap.Int("htpasswd_entries_count", len(h.htpasswdEntries)),
 		)
 	}
-	
+
 	if h.isIPAllowed(clientIP) {
 		if h.logger != nil {
 			h.logger.Debug("IP allowed, bypassing maintenance", zap.String("client_ip", clientIP))
@@ -516,7 +629,7 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 			zap.String("auth_header", r.Header.Get("Authorization")),
 		)
 	}
-	
+
 	if authResult {
 		return next.ServeHTTP(w, r)
 	}
@@ -554,7 +667,6 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 		}
 	}
 }
-
 
 func serveMaintenancePage(r *http.Request, w http.ResponseWriter, h *MaintenanceHandler) error {
 	// Set Retry-After header with default value if not specified
