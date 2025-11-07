@@ -915,6 +915,20 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 					return nil, h.Errf("request_retention_mode_timeout value must be positive")
 				}
 				m.RequestRetentionModeTimeout = val
+			case "use_forwarded_headers":
+				if !h.NextArg() {
+					return nil, h.ArgErr()
+				}
+				val, err := strconv.ParseBool(h.Val())
+				if err != nil {
+					return nil, h.Errf("invalid use_forwarded_headers value: %v", err)
+				}
+
+				m.UseForwardedHeaders = val
+			case "trusted_proxies":
+				for h.NextArg() {
+					m.TrustedProxies = append(m.TrustedProxies, h.Val())
+				}
 			case "allowed_ips_file":
 				if !h.NextArg() {
 					return nil, h.ArgErr()
