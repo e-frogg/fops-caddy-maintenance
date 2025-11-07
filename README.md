@@ -89,6 +89,8 @@ Add the maintenance directive to your Caddyfile:
 | `htpasswd_file` | Path to htpasswd file for HTTP Basic Authentication | No |
 | `auth_realm` | Custom realm name for HTTP Basic Authentication | No |
 | `bypass_paths` | Path(s) without maintenance | No |
+| `use_forwarded_headers` | Read `X-Forwarded-For`/`X-Real-IP` headers from trusted proxies | No |
+| `trusted_proxies` | IPs or CIDR ranges allowed to supply forwarded headers | No |
 
 ### IP Access Control with CIDR Support
 
@@ -114,7 +116,23 @@ maintenance {
 - `2001:db8::/32` - Allows IPv6 addresses in the 2001:db8::/32 range
 - `::/128` - Allows only the IPv6 loopback address (::1)
 
-**Important:** The plugin uses the client's direct IP address (`r.RemoteAddr`) and does not evaluate proxy headers like `X-Forwarded-For` or `X-Real-IP`. If your server is behind a proxy, you must whitelist the proxy's IP address rather than the original client IPs.
+**Important:** By default the plugin uses the client's direct IP address (`r.RemoteAddr`). You can opt-in to honoring proxy headers with `use_forwarded_headers` and a list of `trusted_proxies`. Never enable this option unless the proxies in front of Caddy are under your control, otherwise malicious clients could spoof their IP address.
+
+### Working Behind Trusted Proxies
+
+When Caddy is placed behind a reverse proxy or load balancer, enable forwarded header support so the maintenance checks use the original client IP:
+
+```caddy
+maintenance {
+  use_forwarded_headers true
+  trusted_proxies 10.0.0.10 192.168.100.0/24
+}
+```
+
+- `use_forwarded_headers` activates support for `X-Forwarded-For` and `X-Real-IP`.
+- `trusted_proxies` must contain every proxy IP (or CIDR range) allowed to provide those headers.
+- The handler walks the `X-Forwarded-For` chain from the closest proxy back to the first IP that is not in `trusted_proxies`, treating it as the real client.
+- Requests coming from non-trusted IPs ignore forwarded headers and rely on `r.RemoteAddr` to prevent spoofing.
 
 ### HTTP Basic Authentication
 
@@ -192,7 +210,7 @@ maintenance {
 - `2001:db8::/32` - Allows IPv6 addresses in the 2001:db8::/32 range
 - `::/128` - Allows only the IPv6 loopback address (::1)
 
-**Important:** The plugin uses the client's direct IP address (`r.RemoteAddr`) and does not evaluate proxy headers like `X-Forwarded-For` or `X-Real-IP`. If your server is behind a proxy, you must whitelist the proxy's IP address rather than the original client IPs.
+**Important:** By default the plugin uses the client's direct IP address (`r.RemoteAddr`). You can opt-in to honoring proxy headers with `use_forwarded_headers` and a list of `trusted_proxies`. Never enable this option unless the proxies in front of Caddy are under your control, otherwise malicious clients could spoof their IP address.
 
 ## 🚀 API Reference
 
