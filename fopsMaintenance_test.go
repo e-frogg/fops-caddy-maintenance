@@ -122,55 +122,53 @@ func TestMaintenanceHandler(t *testing.T) {
 
 func TestParseTrustedProxiesValidation(t *testing.T) {
 	tests := []struct {
-		name        string
-		handler     MaintenanceHandler
-		expectError bool
+		name         string
+		useForwarded bool
+		trusted      []string
+		expectError  bool
 	}{
 		{
-			name: "forwarded headers disabled without proxies",
-			handler: MaintenanceHandler{
-				UseForwardedHeaders: false,
-			},
-			expectError: false,
+			name:         "forwarded headers disabled without proxies",
+			useForwarded: false,
+			expectError:  false,
 		},
 		{
-			name: "forwarded headers enabled without proxies",
-			handler: MaintenanceHandler{
-				UseForwardedHeaders: true,
-			},
-			expectError: true,
+			name:         "forwarded headers enabled without proxies",
+			useForwarded: true,
+			expectError:  true,
 		},
 		{
-			name: "invalid proxy entry",
-			handler: MaintenanceHandler{
-				UseForwardedHeaders: true,
-				TrustedProxies:      []string{"not-an-ip"},
-			},
-			expectError: true,
+			name:         "invalid proxy entry",
+			useForwarded: true,
+			trusted:      []string{"not-an-ip"},
+			expectError:  true,
 		},
 		{
-			name: "valid proxies parsed",
-			handler: MaintenanceHandler{
-				UseForwardedHeaders: true,
-				TrustedProxies:      []string{"192.0.2.10", "198.51.100.0/24"},
-			},
-			expectError: false,
+			name:         "valid proxies parsed",
+			useForwarded: true,
+			trusted:      []string{"192.0.2.10", "198.51.100.0/24"},
+			expectError:  false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.handler.parseTrustedProxies()
+			handler := MaintenanceHandler{
+				UseForwardedHeaders: tt.useForwarded,
+				TrustedProxies:      append([]string(nil), tt.trusted...),
+			}
+
+			err := handler.parseTrustedProxies()
 			if tt.expectError {
 				require.Error(t, err)
 				return
 			}
 
 			require.NoError(t, err)
-			if tt.handler.UseForwardedHeaders {
-				require.Len(t, tt.handler.trustedProxyIPs, 1)
-				require.Len(t, tt.handler.trustedProxyNetworks, 1)
-				require.True(t, tt.handler.trustedProxyIPs[0].Equal(net.ParseIP("192.0.2.10")))
+			if handler.UseForwardedHeaders {
+				require.Len(t, handler.trustedProxyIPs, 1)
+				require.Len(t, handler.trustedProxyNetworks, 1)
+				require.True(t, handler.trustedProxyIPs[0].Equal(net.ParseIP("192.0.2.10")))
 			}
 		})
 	}
