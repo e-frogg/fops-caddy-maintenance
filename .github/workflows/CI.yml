@@ -8,9 +8,6 @@ on:
   pull_request_target:
     branches: [ main, master ]
 
-env:
-  GOVERSION: '1.25'
-
 jobs:
   test:
     name: Test
@@ -21,12 +18,16 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GOVERSION }}
+          go-version-file: go.mod
+          check-latest: true
           cache-dependency-path: |
             go.sum
 
       - name: Lint
         uses: golangci/golangci-lint-action@v9
+        with:
+          install-mode: goinstall
+          version: latest
 
       - name: Test
         run: go test -race -coverprofile=coverage.txt ./...
