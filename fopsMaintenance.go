@@ -582,7 +582,8 @@ func (h *MaintenanceHandler) getClientIP(r *http.Request) string {
 func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	h.enabledMux.RLock()
 	enabled := h.enabled
-	temporaryModeEnabled := h.RequestRetentionModeTimeout > 0
+	requestRetentionTimeout := h.RequestRetentionModeTimeout
+	temporaryModeEnabled := requestRetentionTimeout > 0
 	h.enabledMux.RUnlock()
 
 	if !enabled {
@@ -643,7 +644,7 @@ func (h *MaintenanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 	}
 
 	// Request retention mode enabled, retain request for the predefined period
-	timer := time.NewTimer(time.Duration(h.RequestRetentionModeTimeout) * time.Second)
+	timer := time.NewTimer(time.Duration(requestRetentionTimeout) * time.Second)
 	for {
 		// Wait for the timer to expire, the context to be cancelled or the maintenance mode to be disabled
 		// Context can be cancelled in several real-world scenarios:
