@@ -91,8 +91,8 @@ func (h *MaintenanceHandler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger()
 	h.ctx = ctx
 
-	// Register the maintenance handler
-	setMaintenanceHandler(h)
+	// Register the maintenance handler for admin API operations.
+	registerMaintenanceHandler(h)
 
 	// Pre-parse IP access control for performance
 	if err := h.parseAllowedIPs(); err != nil {

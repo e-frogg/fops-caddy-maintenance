@@ -2,10 +2,12 @@ package fopsMaintenance
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -14,7 +16,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func resetMaintenanceHandlersForTest(t *testing.T) {
+	t.Helper()
+	setMaintenanceHandler(nil)
+	t.Cleanup(func() {
+		setMaintenanceHandler(nil)
+	})
+}
+
 func TestAdminHandler_Routes(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
 	handler := AdminHandler{}
 	routes := handler.Routes()
 
@@ -24,6 +36,8 @@ func TestAdminHandler_Routes(t *testing.T) {
 }
 
 func TestAdminHandler_GetStatus(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
 	// Setup
 	handler := AdminHandler{}
 	maintenanceHandler := &MaintenanceHandler{enabled: true}
@@ -51,6 +65,8 @@ func TestAdminHandler_GetStatus(t *testing.T) {
 }
 
 func TestAdminHandler_Toggle(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
 	// Setup
 	handler := AdminHandler{}
 	maintenanceHandler := &MaintenanceHandler{enabled: false}
@@ -89,6 +105,8 @@ func TestAdminHandler_Toggle(t *testing.T) {
 }
 
 func TestAdminHandler_Toggle_InvalidMethod(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
 	handler := AdminHandler{}
 	req := httptest.NewRequest(http.MethodGet, "/maintenance/set", nil)
 	w := httptest.NewRecorder()
@@ -100,6 +118,8 @@ func TestAdminHandler_Toggle_InvalidMethod(t *testing.T) {
 }
 
 func TestAdminHandler_GetStatus_NoHandler(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
 	// Reset the handler
 	setMaintenanceHandler(nil)
 
@@ -114,6 +134,8 @@ func TestAdminHandler_GetStatus_NoHandler(t *testing.T) {
 }
 
 func TestAdminHandler_Toggle_InvalidBody(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
 	handler := AdminHandler{}
 	invalidJSON := []byte(`{"enabled": invalid, "request_retention_mode_timeout": "invalid"}`)
 
@@ -136,6 +158,8 @@ func TestAdminHandler_Toggle_InvalidBody(t *testing.T) {
 }
 
 func TestAdminHandler_Toggle_NoHandler(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
 	// Setup
 	handler := AdminHandler{}
 	// Reset the handler to nil
@@ -171,6 +195,8 @@ func TestAdminHandler_Toggle_NoHandler(t *testing.T) {
 
 // TestAdminHandler_MarshalError tests the error handling when json.Marshal fails
 func TestAdminHandler_MarshalError(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
 	// Create a temporary directory for the test
 	tmpDir := t.TempDir()
 	statusFile := filepath.Join(tmpDir, "maintenance_status.json")
@@ -222,6 +248,8 @@ func TestAdminHandler_MarshalError(t *testing.T) {
 
 // TestJSONMarshalFunctions tests the JSON marshal function helpers
 func TestJSONMarshalFunctions(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
 	// Save original marshal function
 	originalMarshalFunc := jsonMarshalFunc
 	defer func() {
@@ -258,4 +286,129 @@ func TestJSONMarshalFunctions(t *testing.T) {
 	err = json.Unmarshal(data, &result)
 	assert.NoError(t, err)
 	assert.Equal(t, "value", result["test"])
+}
+
+func TestAdminHandler_Toggle_UpdatesAllRegisteredHandlers(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
+	handler := AdminHandler{}
+	tmpDir := t.TempDir()
+	statusFileA := filepath.Join(tmpDir, "a.json")
+	statusFileB := filepath.Join(tmpDir, "b.json")
+
+	maintenanceHandlerA := &MaintenanceHandler{enabled: false, StatusFile: statusFileA}
+	maintenanceHandlerB := &MaintenanceHandler{enabled: false, StatusFile: statusFileB}
+	registerMaintenanceHandler(maintenanceHandlerA)
+	registerMaintenanceHandler(maintenanceHandlerB)
+
+	body := map[string]interface{}{
+		"enabled":                        true,
+		"request_retention_mode_timeout": 30,
+	}
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/maintenance/set", bytes.NewBuffer(bodyBytes))
+	w := httptest.NewRecorder()
+
+	err = handler.toggle(w, req)
+	require.NoError(t, err)
+
+	for _, maintenanceHandler := range []*MaintenanceHandler{maintenanceHandlerA, maintenanceHandlerB} {
+		maintenanceHandler.enabledMux.RLock()
+		assert.True(t, maintenanceHandler.enabled)
+		assert.Equal(t, 30, maintenanceHandler.RequestRetentionModeTimeout)
+		maintenanceHandler.enabledMux.RUnlock()
+	}
+
+	for _, statusFile := range []string{statusFileA, statusFileB} {
+		content, err := os.ReadFile(statusFile)
+		require.NoError(t, err)
+		var status struct {
+			Enabled bool `json:"enabled"`
+		}
+		require.NoError(t, json.Unmarshal(content, &status))
+		assert.True(t, status.Enabled)
+	}
+}
+
+func TestAdminHandler_GetStatus_MultipleHandlers_AnyEnabled(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
+	handler := AdminHandler{}
+	registerMaintenanceHandler(&MaintenanceHandler{enabled: false})
+	registerMaintenanceHandler(&MaintenanceHandler{enabled: true})
+
+	req := httptest.NewRequest(http.MethodGet, "/maintenance/status", nil)
+	w := httptest.NewRecorder()
+
+	err := handler.getStatus(w, req)
+	require.NoError(t, err)
+
+	var response map[string]bool
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&response))
+	assert.True(t, response["enabled"])
+}
+
+func TestGetMaintenanceHandlers_PrunesCancelledHandlers(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
+	activeCtx, cancelActive := context.WithCancel(context.Background())
+	defer cancelActive()
+
+	cancelledCtx, cancelCancelled := context.WithCancel(context.Background())
+	cancelCancelled()
+
+	activeHandler := &MaintenanceHandler{ctx: caddy.Context{Context: activeCtx}}
+	cancelledHandler := &MaintenanceHandler{ctx: caddy.Context{Context: cancelledCtx}}
+
+	registerMaintenanceHandler(activeHandler)
+	registerMaintenanceHandler(cancelledHandler)
+
+	handlers := getMaintenanceHandlers()
+	require.Len(t, handlers, 1)
+	assert.Same(t, activeHandler, handlers[0])
+}
+
+func TestAdminHandler_Toggle_PersistFailureDoesNotChangeMemoryState(t *testing.T) {
+	resetMaintenanceHandlersForTest(t)
+
+	handler := AdminHandler{}
+	tmpDir := t.TempDir()
+	statusFileA := filepath.Join(tmpDir, "a.json")
+	statusFileB := filepath.Join(tmpDir, "missing", "b.json")
+
+	require.NoError(t, os.WriteFile(statusFileA, []byte(`{"enabled":false}`), 0644))
+
+	maintenanceHandlerA := &MaintenanceHandler{enabled: false, StatusFile: statusFileA}
+	maintenanceHandlerB := &MaintenanceHandler{enabled: false, StatusFile: statusFileB}
+	registerMaintenanceHandler(maintenanceHandlerA)
+	registerMaintenanceHandler(maintenanceHandlerB)
+
+	body := map[string]interface{}{
+		"enabled": true,
+	}
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/maintenance/set", bytes.NewBuffer(bodyBytes))
+	w := httptest.NewRecorder()
+
+	err = handler.toggle(w, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to persist status")
+
+	for _, maintenanceHandler := range []*MaintenanceHandler{maintenanceHandlerA, maintenanceHandlerB} {
+		maintenanceHandler.enabledMux.RLock()
+		assert.False(t, maintenanceHandler.enabled)
+		maintenanceHandler.enabledMux.RUnlock()
+	}
+
+	content, readErr := os.ReadFile(statusFileA)
+	require.NoError(t, readErr)
+	var status struct {
+		Enabled bool `json:"enabled"`
+	}
+	require.NoError(t, json.Unmarshal(content, &status))
+	assert.False(t, status.Enabled)
 }
