@@ -9,7 +9,7 @@ on:
     branches: [ main, master ]
 
 env:
-  GOVERSION: '1.22'
+  GOVERSION: '1.25'
 
 jobs:
   test:
@@ -27,6 +27,9 @@ jobs:
 
       - name: Lint
         uses: golangci/golangci-lint-action@v8
+        with:
+          install-mode: goinstall
+          version: latest
 
       - name: Test
         run: go test -race -coverprofile=coverage.txt ./...
